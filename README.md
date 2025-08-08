@@ -1,5 +1,41 @@
 # VanitySearch
 
+このディレクトリは VanitySearch の Nostr 拡張版です。Bitcoin アドレスに加えて、Nostr の公開鍵アドレス（npub、NIP-19/bech32）に対するバニティ検索（接頭辞/接尾辞一致）をサポートします。GPU（CUDA）/CPU の両方で動作します。
+
+主な拡張点（Nostr）
+- npub（HRP: "npub"）のバニティ検索に対応
+- 入力は `npub1...` 形式、またはデータ部のみの接頭辞/接尾辞を受け付け
+- GPU 側の一致候補はホスト側で再検証し、不一致は出力前に除外（ログは`/tmp/vanity_nostr.log`、`VS_DEBUG_LOG_PATH`で変更可）
+
+Nostr 版 かんたん実行例
+```sh
+# GPU で "npub1k0jr" を探索
+./VanitySearch -gpu -gpuId 0 -g 256,256 -t 1 -stop npub1k0jr
+
+# ログファイル（詳細デバッグ）
+tail -n 200 /tmp/vanity_nostr.log
+```
+
+Docker（GPU）
+```sh
+# ルートでビルド（CCAP は GPU に合わせて変更、A100=80 等）
+docker build --build-arg CCAP=80 -t vanitysearch-nostr:latest .
+
+# 実行例
+docker run --rm --gpus all vanitysearch-nostr:latest \
+  -gpu -gpuId 0 -g 256,256 -t 1 -stop npub1k0jr
+```
+
+docker-compose
+```sh
+docker compose up --build
+```
+
+注意
+- GPU の Compute Capability（CCAP）は環境に合わせて設定してください（例: A100=80, RTX30=86）。
+- 標準出力に出るアドレスはホスト側再検証済みの一致のみです。大量ログはファイル出力に切り替えています。
+
+
 VanitySearch is a bitcoin address prefix finder. If you want to generate safe private keys, use the -s option to enter your passphrase which will be used for generating a base key as for BIP38 standard (*VanitySearch.exe -s "My PassPhrase" 1MyPrefix*). You can also use *VanitySearch.exe -ps "My PassPhrase"* which will add a crypto secure seed to your passphrase.\
 VanitySearch may not compute a good grid size for your GPU, so try different values using -g option in order to get the best performances. If you want to use GPUs and CPUs together, you may have best performances by keeping one CPU core for handling GPU(s)/CPU exchanges (use -t option to set the number of CPU threads).
 

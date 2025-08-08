@@ -80,6 +80,15 @@ int bech32_encode(
   size_t data_len
 );
 
+// Encode raw bytes (8-bit) as Bech32 data part (5-bit groups with padding) with given HRP
+// Returns 1 if successful.
+int bech32_encode_data(
+  char *output,
+  const char *hrp,
+  const uint8_t *bytes,
+  size_t bytes_len
+);
+
 /** Decode a Bech32 string
  *
  *  Out: hrp:      Pointer to a buffer of size strlen(input) - 6. Will be
@@ -99,5 +108,8 @@ int bech32_decode(
 );
 
 int bech32_decode_nocheck(uint8_t *data, size_t *data_len, const char *input);
+
+// Internal utility function for 8->5 bit conversion
+int convert_bits(uint8_t* out, size_t* outlen, int outbits, const uint8_t* in, size_t inlen, int inbits, int pad);
 
 #endif

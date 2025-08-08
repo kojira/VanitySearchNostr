@@ -1067,3 +1067,38 @@ bool Secp256K1::EC(Point &p) {
   return _s.IsZero(); // ( ((pow2(y) - (pow3(x) + 7)) % P) == 0 );
 
 }
+
+// ========================================================================
+// Nostr npub generation functions
+// ========================================================================
+
+std::string Secp256K1::GetNostrNpub(Point &pubKey) {
+  
+  // Nostr npub: Bech32(hrp="npub", data = X-only 32 bytes, 8->5 with padding)
+  uint8_t xbytes[32];
+  pubKey.x.Get32Bytes(xbytes);
+  
+
+  
+  char output[128];
+  if (!bech32_encode_data(output, "npub", xbytes, 32)) {
+    return "ERROR: Failed to encode npub";
+  }
+  
+
+  
+  return std::string(output);
+}
+
+std::vector<std::string> Secp256K1::GetNostrNpub(Point &k0, Point &k1, Point &k2, Point &k3) {
+  
+  std::vector<std::string> ret;
+  
+  // Generate npubs for all 4 points
+  ret.push_back(GetNostrNpub(k0));
+  ret.push_back(GetNostrNpub(k1));
+  ret.push_back(GetNostrNpub(k2));
+  ret.push_back(GetNostrNpub(k3));
+  
+  return ret;
+}
