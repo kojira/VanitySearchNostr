@@ -27,6 +27,7 @@
 #include <string.h>
 #include <math.h>
 #include <algorithm>
+#include <stdarg.h>
 #ifndef WIN64
 #include <pthread.h>
 #endif
@@ -36,12 +37,31 @@ using namespace std;
 Point Gn[CPU_GRP_SIZE / 2];
 Point _2Gn;
 
+// Simple file logger to avoid flooding stdout
+static FILE *vs_debug_log_file = NULL;
+static void vs_debug_logf(const char *fmt, ...) {
+  if (vs_debug_log_file == NULL) {
+    const char *path = getenv("VS_DEBUG_LOG_PATH");
+    if (path == NULL || path[0] == '\0') path = "/tmp/vanity_nostr.log";
+    vs_debug_log_file = fopen(path, "a");
+    if (vs_debug_log_file == NULL) return; // give up silently
+    setvbuf(vs_debug_log_file, NULL, _IOLBF, 0); // line buffered
+  }
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(vs_debug_log_file, fmt, ap);
+  va_end(ap);
+  fflush(vs_debug_log_file);
+}
+
 // ----------------------------------------------------------------------------
 
 VanitySearch::VanitySearch(Secp256K1 *secp, vector<std::string> &inputPrefixes,string seed,int searchMode,
                            bool useGpu, bool stop, string outputFile, bool useSSE, uint32_t maxFound,
                            uint64_t rekey, bool caseSensitive, Point &startPubKey, bool paranoiacSeed)
   :inputPrefixes(inputPrefixes) {
+
+
 
   this->secp = secp;
   this->searchMode = searchMode;
@@ -72,6 +92,7 @@ VanitySearch::VanitySearch(Secp256K1 *secp, vector<std::string> &inputPrefixes,s
   for (int i = 0; i < (int)inputPrefixes.size() && !hasPattern; i++) {
     hasPattern = ((inputPrefixes[i].find('*') != std::string::npos) ||
                    (inputPrefixes[i].find('?') != std::string::npos) );
+
   }
 
   if (!hasPattern) {
@@ -82,9 +103,12 @@ VanitySearch::VanitySearch(Secp256K1 *secp, vector<std::string> &inputPrefixes,s
     if (loadingProgress)
       printf("[Building lookup16   0.0%%]\r");
 
+
+
     nbPrefix = 0;
     onlyFull = true;
     for (int i = 0; i < (int)inputPrefixes.size(); i++) {
+
 
       PREFIX_ITEM it;
       std::vector<PREFIX_ITEM> itPrefixes;
@@ -342,6 +366,8 @@ bool VanitySearch::initPrefix(std::string &prefix,PREFIX_ITEM *it) {
   int nbDigit = 0;
   bool wrong = false;
 
+
+
   if (prefix.length() < 2) {
     printf("Ignoring prefix \"%s\" (too short)\n",prefix.c_str());
     return false;
@@ -350,78 +376,51 @@ bool VanitySearch::initPrefix(std::string &prefix,PREFIX_ITEM *it) {
   int aType = -1;
 
 
-  switch (prefix.data()[0]) {
-  case '1':
-    aType = P2PKH;
-    break;
-  case '3':
-    aType = P2SH;
-    break;
-  case 'b':
-  case 'B':
-    std::transform(prefix.begin(), prefix.end(), prefix.begin(), ::tolower);
-    if(strncmp(prefix.c_str(), "bc1q", 4) == 0)
-      aType = BECH32;
-    break;
+  // Check for Nostr npub prefix or suffix-only form
+  bool hasNpubHrp = (prefix.length() >= 4 && prefix.substr(0, 4) == "npub");
+  bool suffixOnly = !hasNpubHrp; // accept bare suffix like "abc"
+  if (hasNpubHrp || suffixOnly) {
+    aType = NOSTR_NPUB;
   }
 
   if (aType==-1) {
-    printf("Ignoring prefix \"%s\" (must start with 1 or 3 or bc1q)\n", prefix.c_str());
+    printf("Ignoring prefix \"%s\" (must start with npub)\n", prefix.c_str());
     return false;
   }
 
   if (searchType == -1) searchType = aType;
   if (aType != searchType) {
-    printf("Ignoring prefix \"%s\" (P2PKH, P2SH or BECH32 allowed at once)\n", prefix.c_str());
+    printf("Ignoring prefix \"%s\" (Only Nostr npub allowed)\n", prefix.c_str());
     return false;
   }
 
-  if (aType == BECH32) {
+  if (aType == NOSTR_NPUB) {
 
-    // BECH32
-    uint8_t witprog[40];
-    size_t witprog_len;
-    int witver;
-    const char* hrp = "bc";
+    // Normalize suffix to validate difficulty and matching base
+    string suffix = hasNpubHrp ? prefix.substr(4) : prefix;
+    if (!suffix.empty() && suffix[0] == '1') suffix.erase(0, 1);
 
-    int ret = segwit_addr_decode(&witver, witprog, &witprog_len, hrp, prefix.c_str());
-
-    // Try to attack a full address ?
-    if (ret && witprog_len==20) {
-
-      // mamma mia !
-      it->difficulty = pow(2, 160);
-      it->isFull = true;
-      memcpy(it->hash160, witprog, 20);
-      it->sPrefix = *(prefix_t *)(it->hash160);
-      it->lPrefix = *(prefixl_t *)(it->hash160);
-      it->prefix = (char *)prefix.c_str();
-      it->prefixLength = (int)prefix.length();
-      return true;
-
+    // Normalize to lowercase and validate against Bech32 charset (lowercase)
+    const std::string bech32chars = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    for (size_t i = 0; i < suffix.size(); ++i) {
+      char c = tolower(suffix[i]);
+      if (bech32chars.find(c) == std::string::npos) {
+        printf("Ignoring prefix \"%s\" (Invalid npub charset; allowed: %s)\n", prefix.c_str(), bech32chars.c_str());
+        return false;
+      }
+      suffix[i] = c;
     }
-
-    if (prefix.length() < 5) {
-      printf("Ignoring prefix \"%s\" (too short, length<5 )\n", prefix.c_str());
-      return false;
-    }
-
-    if (prefix.length() >= 36) {
-      printf("Ignoring prefix \"%s\" (too long, length>36 )\n", prefix.c_str());
-      return false;
-    }
-
+    
+    // Set up prefix data for searching
     uint8_t data[64];
     memset(data,0,64);
-    size_t data_length;
-    if(!bech32_decode_nocheck(data,&data_length,prefix.c_str()+4)) {
-      printf("Ignoring prefix \"%s\" (Only \"023456789acdefghjklmnpqrstuvwxyz\" allowed)\n", prefix.c_str());
-      return false;
-    }
+    // Convert prefix to bytes for comparison
+    memcpy(data, prefix.c_str(), min((int)prefix.length(), 64));
 
-    // Difficulty
+    // Difficulty calculation for npub prefix
     it->sPrefix = *(prefix_t *)data;
-    it->difficulty = pow(2, 5*(prefix.length()-4));
+    // Difficultyはデータ部の5bit文字数（HRPと区切り'1'は含めない）に基づく
+    it->difficulty = pow(2, 5*(int)suffix.length());
     it->isFull = false;
     it->lPrefix = 0;
     it->prefix = (char *)prefix.c_str();
@@ -430,98 +429,9 @@ bool VanitySearch::initPrefix(std::string &prefix,PREFIX_ITEM *it) {
     return true;
 
   } else {
-
-    // P2PKH/P2SH
-
-    wrong = !DecodeBase58(prefix, result);
-
-    if (wrong) {
-      if (caseSensitive)
-        printf("Ignoring prefix \"%s\" (0, I, O and l not allowed)\n", prefix.c_str());
-      return false;
-    }
-
-    // Try to attack a full address ?
-    if (result.size() > 21) {
-
-      // mamma mia !
-      //if (!secp.CheckPudAddress(prefix)) {
-      //  printf("Warning, \"%s\" (address checksum may never match)\n", prefix.c_str());
-      //}
-      it->difficulty = pow(2, 160);
-      it->isFull = true;
-      memcpy(it->hash160, result.data() + 1, 20);
-      it->sPrefix = *(prefix_t *)(it->hash160);
-      it->lPrefix = *(prefixl_t *)(it->hash160);
-      it->prefix = (char *)prefix.c_str();
-      it->prefixLength = (int)prefix.length();
-      return true;
-
-    }
-
-    // Prefix containing only '1'
-    if (isSingularPrefix(prefix)) {
-
-      if (prefix.length() > 21) {
-        printf("Ignoring prefix \"%s\" (Too much 1)\n", prefix.c_str());
-        return false;
-      }
-
-      // Difficulty
-      it->difficulty = pow(256, prefix.length() - 1);
-      it->isFull = false;
-      it->sPrefix = 0;
-      it->lPrefix = 0;
-      it->prefix = (char *)prefix.c_str();
-      it->prefixLength = (int)prefix.length();
-      return true;
-
-    }
-
-    // Search for highest hash160 16bit prefix (most probable)
-
-    while (result.size() < 25) {
-      DecodeBase58(dummy1, result);
-      if (result.size() < 25) {
-        dummy1.append("1");
-        nbDigit++;
-      }
-    }
-
-    if (searchType == P2SH) {
-      if (result.data()[0] != 5) {
-        if(caseSensitive)
-          printf("Ignoring prefix \"%s\" (Unreachable, 31h1 to 3R2c only)\n", prefix.c_str());
-        return false;
-      }
-    }
-
-    if (result.size() != 25) {
-      printf("Ignoring prefix \"%s\" (Invalid size)\n", prefix.c_str());
-      return false;
-    }
-
-    //printf("VanitySearch: Found prefix %s\n",GetHex(result).c_str() );
-    it->sPrefix = *(prefix_t *)(result.data() + 1);
-
-    dummy1.append("1");
-    DecodeBase58(dummy1, result);
-
-    if (result.size() == 25) {
-      //printf("VanitySearch: Found prefix %s\n", GetHex(result).c_str());
-      it->sPrefix = *(prefix_t *)(result.data() + 1);
-      nbDigit++;
-    }
-
-    // Difficulty
-    it->difficulty = pow(2, 192) / pow(58, nbDigit);
-    it->isFull = false;
-    it->lPrefix = 0;
-    it->prefix = (char *)prefix.c_str();
-    it->prefixLength = (int)prefix.length();
-
-    return true;
-
+    // Only Nostr npub supported
+    printf("Ignoring prefix \"%s\" (Only Nostr npub supported)\n", prefix.c_str());
+    return false;
   }
 }
 
@@ -799,7 +709,7 @@ bool VanitySearch::checkPrivKey(string addr, Int &key, int32_t incr, int endomor
   Point p = secp->ComputePublicKey(&k);
   if (startPubKeySpecified) p = secp->AddDirect(p, sp);
 
-  string chkAddr = secp->GetAddress(searchType, mode, p);
+  string chkAddr = secp->GetNostrNpub(p);
   if (chkAddr != addr) {
 
     //Key may be the opposite one (negative zero or compressed key)
@@ -810,12 +720,10 @@ bool VanitySearch::checkPrivKey(string addr, Int &key, int32_t incr, int endomor
       sp.y.ModNeg();
       p = secp->AddDirect(p, sp);
     }
-    string chkAddr = secp->GetAddress(searchType, mode, p);
+    string chkAddr = secp->GetNostrNpub(p);
     if (chkAddr != addr) {
-      printf("\nWarning, wrong private key generated !\n");
-      printf("  Addr :%s\n", addr.c_str());
-      printf("  Check:%s\n", chkAddr.c_str());
-      printf("  Endo:%d incr:%d comp:%d\n", endomorphism, incr, mode);
+      vs_debug_logf("[checkPrivKey] WARNING wrong private key! addr='%s' chk='%s' endo=%d incr=%d comp=%d\n",
+                    addr.c_str(), chkAddr.c_str(), endomorphism, incr, (int)mode);
       return false;
     }
 
@@ -831,7 +739,19 @@ void VanitySearch::checkAddrSSE(uint8_t *h1, uint8_t *h2, uint8_t *h3, uint8_t *
                                 int32_t incr1, int32_t incr2, int32_t incr3, int32_t incr4,
                                 Int &key, int endomorphism, bool mode) {
 
-  vector<string> addr = secp->GetAddress(searchType, mode, h1,h2,h3,h4);
+  // For Nostr, we need to compute public keys from incremented private keys
+  Int k1, k2, k3, k4;
+  k1.Set(&key); k1.Add(incr1);
+  k2.Set(&key); k2.Add(incr2);
+  k3.Set(&key); k3.Add(incr3);
+  k4.Set(&key); k4.Add(incr4);
+  
+  Point p1 = secp->ComputePublicKey(&k1);
+  Point p2 = secp->ComputePublicKey(&k2);
+  Point p3 = secp->ComputePublicKey(&k3);
+  Point p4 = secp->ComputePublicKey(&k4);
+  
+  vector<string> addr = secp->GetNostrNpub(p1, p2, p3, p4);
 
   for (int i = 0; i < (int)inputPrefixes.size(); i++) {
 
@@ -839,7 +759,7 @@ void VanitySearch::checkAddrSSE(uint8_t *h1, uint8_t *h2, uint8_t *h3, uint8_t *
 
       // Found it !
       //*((*pi)[i].found) = true;
-      if (checkPrivKey(addr[0], key, incr1, endomorphism, mode)) {
+      if (checkPrivKey(addr[0], k1, incr1, endomorphism, mode)) {
         nbFoundKey++;
         patternFound[i] = true;
         updateFound();
@@ -851,7 +771,7 @@ void VanitySearch::checkAddrSSE(uint8_t *h1, uint8_t *h2, uint8_t *h3, uint8_t *
 
       // Found it !
       //*((*pi)[i].found) = true;
-      if (checkPrivKey(addr[1], key, incr2, endomorphism, mode)) {
+      if (checkPrivKey(addr[1], k2, 0, endomorphism, mode)) {
         nbFoundKey++;
         patternFound[i] = true;
         updateFound();
@@ -863,7 +783,7 @@ void VanitySearch::checkAddrSSE(uint8_t *h1, uint8_t *h2, uint8_t *h3, uint8_t *
 
       // Found it !
       //*((*pi)[i].found) = true;
-      if (checkPrivKey(addr[2], key, incr3, endomorphism, mode)) {
+      if (checkPrivKey(addr[2], k3, 0, endomorphism, mode)) {
         nbFoundKey++;
         patternFound[i] = true;
         updateFound();
@@ -875,7 +795,7 @@ void VanitySearch::checkAddrSSE(uint8_t *h1, uint8_t *h2, uint8_t *h3, uint8_t *
 
       // Found it !
       //*((*pi)[i].found) = true;
-      if (checkPrivKey(addr[3], key, incr4, endomorphism, mode)) {
+      if (checkPrivKey(addr[3], k4, 0, endomorphism, mode)) {
         nbFoundKey++;
         patternFound[i] = true;
         updateFound();
@@ -1001,57 +921,158 @@ void VanitySearch::checkAddresses(bool compressed, Int key, int i, Point p1) {
   Point pte1[1];
   Point pte2[1];
 
-  // Point
-  secp->GetHash160(searchType,compressed, p1, h0);
-  prefix_t pr0 = *(prefix_t *)h0;
-  if (hasPattern || prefixes[pr0].items)
-    checkAddr(pr0, h0, key, i, 0, compressed);
+  // Nostr npub handling: compare by npub prefix (after stripping constant 'npub1')
+  if (searchType == NOSTR_NPUB) {
+    string addr = secp->GetNostrNpub(p1);
+    // Extract data-dependent suffix from generated npub (drop leading "npub1")
+    const char *full = addr.c_str();
+    const char *npubSuffix = (addr.rfind("npub1", 0) == 0) ? (full + 5) : full;
+
+
+
+    for (int idx = 0; idx < (int)inputPrefixes.size(); idx++) {
+      const string &rawPref = inputPrefixes[idx];
+      // Normalize user prefix: allow with or without leading "npub"/"npub1"
+      const char *p = rawPref.c_str();
+      if (rawPref.rfind("npub", 0) == 0) {
+        p += 4;
+        if (*p == '1') p++;
+      }
+      
+      // DEBUG (file): Log the pattern matching
+      vs_debug_logf("[checkAddresses] compare suffix='%s' pattern='%s' full='%s'\n", npubSuffix, p, full);
+      
+      // Compare user suffix as prefix of generated suffix
+      if ((int)strlen(p) <= (int)strlen(npubSuffix) && strncmp(npubSuffix, p, strlen(p)) == 0) {
+        vs_debug_logf("[checkAddresses] MATCH npub='%s' pattern='%s' (CPU path)\n", full, rawPref.c_str());
+        if (checkPrivKey(addr, key, i, 0, compressed)) {
+          nbFoundKey++;
+          updateFound();
+        }
+      }
+    }
+  } else {
+    // Point (Bitcoin address search path)
+    secp->GetHash160(searchType, compressed, p1, h0);
+    prefix_t pr0 = *(prefix_t *)h0;
+    if (hasPattern || prefixes[pr0].items)
+      checkAddr(pr0, h0, key, i, 0, compressed);
+  }
 
   // Endomorphism #1
   pte1[0].x.ModMulK1(&p1.x, &beta);
   pte1[0].y.Set(&p1.y);
 
-  secp->GetHash160(searchType, compressed, pte1[0], h0);
-
-  pr0 = *(prefix_t *)h0;
-  if (hasPattern || prefixes[pr0].items)
-    checkAddr(pr0, h0, key, i, 1, compressed);
+  if (searchType == NOSTR_NPUB) {
+    string addr = secp->GetNostrNpub(pte1[0]);
+    const char *full = addr.c_str();
+    const char *npubSuffix = (addr.rfind("npub1", 0) == 0) ? (full + 5) : full;
+    for (int idx = 0; idx < (int)inputPrefixes.size(); idx++) {
+      const string &rawPref = inputPrefixes[idx];
+      const char *p = rawPref.c_str();
+      if (rawPref.rfind("npub", 0) == 0) { p += 4; if (*p == '1') p++; }
+      if ((int)strlen(p) <= (int)strlen(npubSuffix) && strncmp(npubSuffix, p, strlen(p)) == 0) {
+        vs_debug_logf("[checkAddresses] endo#1 match npub='%s' pattern='%s'\n", full, rawPref.c_str());
+        if (checkPrivKey(addr, key, i, 1, compressed)) { nbFoundKey++; updateFound(); }
+      }
+    }
+  } else {
+    secp->GetHash160(searchType, compressed, pte1[0], h0);
+    prefix_t pr0 = *(prefix_t *)h0;
+    if (hasPattern || prefixes[pr0].items)
+      checkAddr(pr0, h0, key, i, 1, compressed);
+  }
 
   // Endomorphism #2
   pte2[0].x.ModMulK1(&p1.x, &beta2);
   pte2[0].y.Set(&p1.y);
 
-  secp->GetHash160(searchType, compressed, pte2[0], h0);
-
-  pr0 = *(prefix_t *)h0;
-  if (hasPattern || prefixes[pr0].items)
-    checkAddr(pr0, h0, key, i, 2, compressed);
+  if (searchType == NOSTR_NPUB) {
+    string addr = secp->GetNostrNpub(pte2[0]);
+    const char *full = addr.c_str();
+    const char *npubSuffix = (addr.rfind("npub1", 0) == 0) ? (full + 5) : full;
+    for (int idx = 0; idx < (int)inputPrefixes.size(); idx++) {
+      const string &rawPref = inputPrefixes[idx];
+      const char *p = rawPref.c_str();
+      if (rawPref.rfind("npub", 0) == 0) { p += 4; if (*p == '1') p++; }
+      if ((int)strlen(p) <= (int)strlen(npubSuffix) && strncmp(npubSuffix, p, strlen(p)) == 0) {
+        vs_debug_logf("[checkAddresses] endo#2 match npub='%s' pattern='%s'\n", full, rawPref.c_str());
+        if (checkPrivKey(addr, key, i, 2, compressed)) { nbFoundKey++; updateFound(); }
+      }
+    }
+  } else {
+    secp->GetHash160(searchType, compressed, pte2[0], h0);
+    prefix_t pr0 = *(prefix_t *)h0;
+    if (hasPattern || prefixes[pr0].items)
+      checkAddr(pr0, h0, key, i, 2, compressed);
+  }
 
   // Curve symetrie
   // if (x,y) = k*G, then (x, -y) is -k*G
   p1.y.ModNeg();
-  secp->GetHash160(searchType, compressed, p1, h0);
-  pr0 = *(prefix_t *)h0;
-  if (hasPattern || prefixes[pr0].items)
-    checkAddr(pr0, h0, key, -i, 0, compressed);
+  if (searchType == NOSTR_NPUB) {
+    string addr = secp->GetNostrNpub(p1);
+    const char *full = addr.c_str();
+    const char *npubSuffix = (addr.rfind("npub1", 0) == 0) ? (full + 5) : full;
+    for (int idx = 0; idx < (int)inputPrefixes.size(); idx++) {
+      const string &rawPref = inputPrefixes[idx];
+      const char *p = rawPref.c_str();
+      if (rawPref.rfind("npub", 0) == 0) { p += 4; if (*p == '1') p++; }
+      if ((int)strlen(p) <= (int)strlen(npubSuffix) && strncmp(npubSuffix, p, strlen(p)) == 0) {
+        vs_debug_logf("[checkAddresses] sym match npub='%s' pattern='%s'\n", full, rawPref.c_str());
+        if (checkPrivKey(addr, key, -i, 0, compressed)) { nbFoundKey++; updateFound(); }
+      }
+    }
+  } else {
+    secp->GetHash160(searchType, compressed, p1, h0);
+    prefix_t pr0 = *(prefix_t *)h0;
+    if (hasPattern || prefixes[pr0].items)
+      checkAddr(pr0, h0, key, -i, 0, compressed);
+  }
 
   // Endomorphism #1
   pte1[0].y.ModNeg();
-
-  secp->GetHash160(searchType, compressed, pte1[0], h0);
-
-  pr0 = *(prefix_t *)h0;
-  if (hasPattern || prefixes[pr0].items)
-    checkAddr(pr0, h0, key, -i, 1, compressed);
+  if (searchType == NOSTR_NPUB) {
+    string addr = secp->GetNostrNpub(pte1[0]);
+    const char *full = addr.c_str();
+    const char *npubSuffix = (addr.rfind("npub1", 0) == 0) ? (full + 5) : full;
+    for (int idx = 0; idx < (int)inputPrefixes.size(); idx++) {
+      const string &rawPref = inputPrefixes[idx];
+      const char *p = rawPref.c_str();
+      if (rawPref.rfind("npub", 0) == 0) { p += 4; if (*p == '1') p++; }
+      if ((int)strlen(p) <= (int)strlen(npubSuffix) && strncmp(npubSuffix, p, strlen(p)) == 0) {
+        vs_debug_logf("[checkAddresses] sym endo#1 match npub='%s' pattern='%s'\n", full, rawPref.c_str());
+        if (checkPrivKey(addr, key, -i, 1, compressed)) { nbFoundKey++; updateFound(); }
+      }
+    }
+  } else {
+    secp->GetHash160(searchType, compressed, pte1[0], h0);
+    prefix_t pr0 = *(prefix_t *)h0;
+    if (hasPattern || prefixes[pr0].items)
+      checkAddr(pr0, h0, key, -i, 1, compressed);
+  }
 
   // Endomorphism #2
   pte2[0].y.ModNeg();
-
-  secp->GetHash160(searchType, compressed, pte2[0], h0);
-
-  pr0 = *(prefix_t *)h0;
-  if (hasPattern || prefixes[pr0].items)
-    checkAddr(pr0, h0, key, -i, 2, compressed);
+  if (searchType == NOSTR_NPUB) {
+    string addr = secp->GetNostrNpub(pte2[0]);
+    const char *full = addr.c_str();
+    const char *npubSuffix = (addr.rfind("npub1", 0) == 0) ? (full + 5) : full;
+    for (int idx = 0; idx < (int)inputPrefixes.size(); idx++) {
+      const string &rawPref = inputPrefixes[idx];
+      const char *p = rawPref.c_str();
+      if (rawPref.rfind("npub", 0) == 0) { p += 4; if (*p == '1') p++; }
+      if ((int)strlen(p) <= (int)strlen(npubSuffix) && strncmp(npubSuffix, p, strlen(p)) == 0) {
+        vs_debug_logf("[checkAddresses] sym endo#2 match npub='%s' pattern='%s'\n", full, rawPref.c_str());
+        if (checkPrivKey(addr, key, -i, 2, compressed)) { nbFoundKey++; updateFound(); }
+      }
+    }
+  } else {
+    secp->GetHash160(searchType, compressed, pte2[0], h0);
+    prefix_t pr0 = *(prefix_t *)h0;
+    if (hasPattern || prefixes[pr0].items)
+      checkAddr(pr0, h0, key, -i, 2, compressed);
+  }
 
 }
 
@@ -1071,28 +1092,60 @@ void VanitySearch::checkAddressesSSE(bool compressed,Int key, int i, Point p1, P
   prefix_t pr3;
 
   // Point -------------------------------------------------------------------------
-  secp->GetHash160(searchType, compressed, p1, p2, p3, p4, h0, h1, h2, h3);
+  if (searchType == NOSTR_NPUB) {
+    vector<string> addr = secp->GetNostrNpub(p1, p2, p3, p4);
+    const char *s0 = addr[0].c_str(); const char *t0 = (addr[0].rfind("npub1", 0) == 0) ? (s0 + 5) : s0;
+    const char *s1 = addr[1].c_str(); const char *t1 = (addr[1].rfind("npub1", 0) == 0) ? (s1 + 5) : s1;
+    const char *s2 = addr[2].c_str(); const char *t2 = (addr[2].rfind("npub1", 0) == 0) ? (s2 + 5) : s2;
+    const char *s3 = addr[3].c_str(); const char *t3 = (addr[3].rfind("npub1", 0) == 0) ? (s3 + 5) : s3;
 
-  if (!hasPattern) {
+    for (int k = 0; k < (int)inputPrefixes.size(); k++) {
+      const string &rawPref = inputPrefixes[k];
+      const char *p = rawPref.c_str();
+      if (rawPref.rfind("npub", 0) == 0) { p += 4; if (*p == '1') p++; }
+      size_t lp = strlen(p);
 
-    pr0 = *(prefix_t *)h0;
-    pr1 = *(prefix_t *)h1;
-    pr2 = *(prefix_t *)h2;
-    pr3 = *(prefix_t *)h3;
-
-    if (prefixes[pr0].items)
-      checkAddr(pr0, h0, key, i, 0, compressed);
-    if (prefixes[pr1].items)
-      checkAddr(pr1, h1, key, i + 1, 0, compressed);
-    if (prefixes[pr2].items)
-      checkAddr(pr2, h2, key, i + 2, 0, compressed);
-    if (prefixes[pr3].items)
-      checkAddr(pr3, h3, key, i + 3, 0, compressed);
-
+      if (lp <= strlen(t0) && strncmp(t0, p, lp) == 0) {
+        vs_debug_logf("[checkAddressesSSE] match t0 npub='%s' pattern='%s'\n", addr[0].c_str(), rawPref.c_str());
+        if (checkPrivKey(addr[0], key, i, 0, compressed)) { nbFoundKey++; updateFound(); }
+      }
+      if (lp <= strlen(t1) && strncmp(t1, p, lp) == 0) { 
+        vs_debug_logf("[checkAddressesSSE] match t1 npub='%s' pattern='%s'\n", addr[1].c_str(), rawPref.c_str());
+        if (checkPrivKey(addr[1], key, i + 1, 0, compressed)) { nbFoundKey++; updateFound(); }
+      }
+      if (lp <= strlen(t2) && strncmp(t2, p, lp) == 0) { 
+        vs_debug_logf("[checkAddressesSSE] match t2 npub='%s' pattern='%s'\n", addr[2].c_str(), rawPref.c_str());
+        if (checkPrivKey(addr[2], key, i + 2, 0, compressed)) { nbFoundKey++; updateFound(); }
+      }
+      if (lp <= strlen(t3) && strncmp(t3, p, lp) == 0) { 
+        vs_debug_logf("[checkAddressesSSE] match t3 npub='%s' pattern='%s'\n", addr[3].c_str(), rawPref.c_str());
+        if (checkPrivKey(addr[3], key, i + 3, 0, compressed)) { nbFoundKey++; updateFound(); }
+      }
+    }
   } else {
+    secp->GetHash160(searchType, compressed, p1, p2, p3, p4, h0, h1, h2, h3);
 
-    checkAddrSSE(h0,h1,h2,h3,i,i+1,i+2,i+3,key,0,compressed);
+    if (!hasPattern) {
 
+      pr0 = *(prefix_t *)h0;
+      pr1 = *(prefix_t *)h1;
+      pr2 = *(prefix_t *)h2;
+      pr3 = *(prefix_t *)h3;
+
+      if (prefixes[pr0].items)
+        checkAddr(pr0, h0, key, i, 0, compressed);
+      if (prefixes[pr1].items)
+        checkAddr(pr1, h1, key, i + 1, 0, compressed);
+      if (prefixes[pr2].items)
+        checkAddr(pr2, h2, key, i + 2, 0, compressed);
+      if (prefixes[pr3].items)
+        checkAddr(pr3, h3, key, i + 3, 0, compressed);
+
+    } else {
+
+      checkAddrSSE(h0, h1, h2, h3, i, i + 1, i + 2, i + 3, key, 0, compressed);
+
+    }
   }
 
   // Endomorphism #1
@@ -1106,28 +1159,33 @@ void VanitySearch::checkAddressesSSE(bool compressed,Int key, int i, Point p1, P
   pte1[3].x.ModMulK1(&p4.x, &beta);
   pte1[3].y.Set(&p4.y);
 
-  secp->GetHash160(searchType, compressed, pte1[0], pte1[1], pte1[2], pte1[3], h0, h1, h2, h3);
-
-  if (!hasPattern) {
-
-    pr0 = *(prefix_t *)h0;
-    pr1 = *(prefix_t *)h1;
-    pr2 = *(prefix_t *)h2;
-    pr3 = *(prefix_t *)h3;
-
-    if (prefixes[pr0].items)
-      checkAddr(pr0, h0, key, i, 1, compressed);
-    if (prefixes[pr1].items)
-      checkAddr(pr1, h1, key, (i + 1), 1, compressed);
-    if (prefixes[pr2].items)
-      checkAddr(pr2, h2, key, (i + 2), 1, compressed);
-    if (prefixes[pr3].items)
-      checkAddr(pr3, h3, key, (i + 3), 1, compressed);
-
+  if (searchType == NOSTR_NPUB) {
+    vector<string> addr = secp->GetNostrNpub(pte1[0], pte1[1], pte1[2], pte1[3]);
+    const char *s0 = addr[0].c_str(); const char *t0 = (addr[0].rfind("npub1", 0) == 0) ? (s0 + 5) : s0;
+    const char *s1 = addr[1].c_str(); const char *t1 = (addr[1].rfind("npub1", 0) == 0) ? (s1 + 5) : s1;
+    const char *s2 = addr[2].c_str(); const char *t2 = (addr[2].rfind("npub1", 0) == 0) ? (s2 + 5) : s2;
+    const char *s3 = addr[3].c_str(); const char *t3 = (addr[3].rfind("npub1", 0) == 0) ? (s3 + 5) : s3;
+    for (int k = 0; k < (int)inputPrefixes.size(); k++) {
+      const string &rawPref = inputPrefixes[k];
+      const char *p = rawPref.c_str();
+      if (rawPref.rfind("npub", 0) == 0) { p += 4; if (*p == '1') p++; }
+      size_t lp = strlen(p);
+      if (lp <= strlen(t0) && strncmp(t0, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] endo#1 t0 npub='%s' pattern='%s'\n", addr[0].c_str(), rawPref.c_str()); if (checkPrivKey(addr[0], key, i, 1, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t1) && strncmp(t1, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] endo#1 t1 npub='%s' pattern='%s'\n", addr[1].c_str(), rawPref.c_str()); if (checkPrivKey(addr[1], key, i + 1, 1, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t2) && strncmp(t2, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] endo#1 t2 npub='%s' pattern='%s'\n", addr[2].c_str(), rawPref.c_str()); if (checkPrivKey(addr[2], key, i + 2, 1, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t3) && strncmp(t3, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] endo#1 t3 npub='%s' pattern='%s'\n", addr[3].c_str(), rawPref.c_str()); if (checkPrivKey(addr[3], key, i + 3, 1, compressed)) { nbFoundKey++; updateFound(); } }
+    }
   } else {
-
-    checkAddrSSE(h0, h1, h2, h3, i, i + 1, i + 2, i + 3, key, 1, compressed);
-
+    secp->GetHash160(searchType, compressed, pte1[0], pte1[1], pte1[2], pte1[3], h0, h1, h2, h3);
+    if (!hasPattern) {
+      pr0 = *(prefix_t *)h0; pr1 = *(prefix_t *)h1; pr2 = *(prefix_t *)h2; pr3 = *(prefix_t *)h3;
+      if (prefixes[pr0].items) checkAddr(pr0, h0, key, i, 1, compressed);
+      if (prefixes[pr1].items) checkAddr(pr1, h1, key, (i + 1), 1, compressed);
+      if (prefixes[pr2].items) checkAddr(pr2, h2, key, (i + 2), 1, compressed);
+      if (prefixes[pr3].items) checkAddr(pr3, h3, key, (i + 3), 1, compressed);
+    } else {
+      checkAddrSSE(h0, h1, h2, h3, i, i + 1, i + 2, i + 3, key, 1, compressed);
+    }
   }
 
   // Endomorphism #2
@@ -1141,28 +1199,33 @@ void VanitySearch::checkAddressesSSE(bool compressed,Int key, int i, Point p1, P
   pte2[3].x.ModMulK1(&p4.x, &beta2);
   pte2[3].y.Set(&p4.y);
 
-  secp->GetHash160(searchType, compressed, pte2[0], pte2[1], pte2[2], pte2[3], h0, h1, h2, h3);
-
-  if (!hasPattern) {
-
-    pr0 = *(prefix_t *)h0;
-    pr1 = *(prefix_t *)h1;
-    pr2 = *(prefix_t *)h2;
-    pr3 = *(prefix_t *)h3;
-
-    if (prefixes[pr0].items)
-      checkAddr(pr0, h0, key, i, 2, compressed);
-    if (prefixes[pr1].items)
-      checkAddr(pr1, h1, key, (i + 1), 2, compressed);
-    if (prefixes[pr2].items)
-      checkAddr(pr2, h2, key, (i + 2), 2, compressed);
-    if (prefixes[pr3].items)
-      checkAddr(pr3, h3, key, (i + 3), 2, compressed);
-
+  if (searchType == NOSTR_NPUB) {
+    vector<string> addr = secp->GetNostrNpub(pte2[0], pte2[1], pte2[2], pte2[3]);
+    const char *s0 = addr[0].c_str(); const char *t0 = (addr[0].rfind("npub1", 0) == 0) ? (s0 + 5) : s0;
+    const char *s1 = addr[1].c_str(); const char *t1 = (addr[1].rfind("npub1", 0) == 0) ? (s1 + 5) : s1;
+    const char *s2 = addr[2].c_str(); const char *t2 = (addr[2].rfind("npub1", 0) == 0) ? (s2 + 5) : s2;
+    const char *s3 = addr[3].c_str(); const char *t3 = (addr[3].rfind("npub1", 0) == 0) ? (s3 + 5) : s3;
+    for (int k = 0; k < (int)inputPrefixes.size(); k++) {
+      const string &rawPref = inputPrefixes[k];
+      const char *p = rawPref.c_str();
+      if (rawPref.rfind("npub", 0) == 0) { p += 4; if (*p == '1') p++; }
+      size_t lp = strlen(p);
+      if (lp <= strlen(t0) && strncmp(t0, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] endo#2 t0 npub='%s' pattern='%s'\n", addr[0].c_str(), rawPref.c_str()); if (checkPrivKey(addr[0], key, i, 2, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t1) && strncmp(t1, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] endo#2 t1 npub='%s' pattern='%s'\n", addr[1].c_str(), rawPref.c_str()); if (checkPrivKey(addr[1], key, (i + 1), 2, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t2) && strncmp(t2, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] endo#2 t2 npub='%s' pattern='%s'\n", addr[2].c_str(), rawPref.c_str()); if (checkPrivKey(addr[2], key, (i + 2), 2, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t3) && strncmp(t3, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] endo#2 t3 npub='%s' pattern='%s'\n", addr[3].c_str(), rawPref.c_str()); if (checkPrivKey(addr[3], key, (i + 3), 2, compressed)) { nbFoundKey++; updateFound(); } }
+    }
   } else {
-
-    checkAddrSSE(h0, h1, h2, h3, i, i + 1, i + 2, i + 3, key, 2, compressed);
-
+    secp->GetHash160(searchType, compressed, pte2[0], pte2[1], pte2[2], pte2[3], h0, h1, h2, h3);
+    if (!hasPattern) {
+      pr0 = *(prefix_t *)h0; pr1 = *(prefix_t *)h1; pr2 = *(prefix_t *)h2; pr3 = *(prefix_t *)h3;
+      if (prefixes[pr0].items) checkAddr(pr0, h0, key, i, 2, compressed);
+      if (prefixes[pr1].items) checkAddr(pr1, h1, key, (i + 1), 2, compressed);
+      if (prefixes[pr2].items) checkAddr(pr2, h2, key, (i + 2), 2, compressed);
+      if (prefixes[pr3].items) checkAddr(pr3, h3, key, (i + 3), 2, compressed);
+    } else {
+      checkAddrSSE(h0, h1, h2, h3, i, i + 1, i + 2, i + 3, key, 2, compressed);
+    }
   }
 
   // Curve symetrie -------------------------------------------------------------------------
@@ -1173,28 +1236,33 @@ void VanitySearch::checkAddressesSSE(bool compressed,Int key, int i, Point p1, P
   p3.y.ModNeg();
   p4.y.ModNeg();
 
-  secp->GetHash160(searchType, compressed, p1, p2, p3, p4, h0, h1, h2, h3);
-
-  if (!hasPattern) {
-
-    pr0 = *(prefix_t *)h0;
-    pr1 = *(prefix_t *)h1;
-    pr2 = *(prefix_t *)h2;
-    pr3 = *(prefix_t *)h3;
-
-    if (prefixes[pr0].items)
-      checkAddr(pr0, h0, key, -i, 0, compressed);
-    if (prefixes[pr1].items)
-      checkAddr(pr1, h1, key, -(i + 1), 0, compressed);
-    if (prefixes[pr2].items)
-      checkAddr(pr2, h2, key, -(i + 2), 0, compressed);
-    if (prefixes[pr3].items)
-      checkAddr(pr3, h3, key, -(i + 3), 0, compressed);
-
+  if (searchType == NOSTR_NPUB) {
+    vector<string> addr = secp->GetNostrNpub(p1, p2, p3, p4);
+    const char *s0 = addr[0].c_str(); const char *t0 = (addr[0].rfind("npub1", 0) == 0) ? (s0 + 5) : s0;
+    const char *s1 = addr[1].c_str(); const char *t1 = (addr[1].rfind("npub1", 0) == 0) ? (s1 + 5) : s1;
+    const char *s2 = addr[2].c_str(); const char *t2 = (addr[2].rfind("npub1", 0) == 0) ? (s2 + 5) : s2;
+    const char *s3 = addr[3].c_str(); const char *t3 = (addr[3].rfind("npub1", 0) == 0) ? (s3 + 5) : s3;
+    for (int k = 0; k < (int)inputPrefixes.size(); k++) {
+      const string &rawPref = inputPrefixes[k];
+      const char *p = rawPref.c_str();
+      if (rawPref.rfind("npub", 0) == 0) { p += 4; if (*p == '1') p++; }
+      size_t lp = strlen(p);
+      if (lp <= strlen(t0) && strncmp(t0, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] sym t0 npub='%s' pattern='%s'\n", addr[0].c_str(), rawPref.c_str()); if (checkPrivKey(addr[0], key, -i, 0, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t1) && strncmp(t1, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] sym t1 npub='%s' pattern='%s'\n", addr[1].c_str(), rawPref.c_str()); if (checkPrivKey(addr[1], key, -(i + 1), 0, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t2) && strncmp(t2, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] sym t2 npub='%s' pattern='%s'\n", addr[2].c_str(), rawPref.c_str()); if (checkPrivKey(addr[2], key, -(i + 2), 0, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t3) && strncmp(t3, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] sym t3 npub='%s' pattern='%s'\n", addr[3].c_str(), rawPref.c_str()); if (checkPrivKey(addr[3], key, -(i + 3), 0, compressed)) { nbFoundKey++; updateFound(); } }
+    }
   } else {
-
-    checkAddrSSE(h0, h1, h2, h3, -i, -(i + 1), -(i + 2), -(i + 3), key, 0, compressed);
-
+    secp->GetHash160(searchType, compressed, p1, p2, p3, p4, h0, h1, h2, h3);
+    if (!hasPattern) {
+      pr0 = *(prefix_t *)h0; pr1 = *(prefix_t *)h1; pr2 = *(prefix_t *)h2; pr3 = *(prefix_t *)h3;
+      if (prefixes[pr0].items) checkAddr(pr0, h0, key, -i, 0, compressed);
+      if (prefixes[pr1].items) checkAddr(pr1, h1, key, -(i + 1), 0, compressed);
+      if (prefixes[pr2].items) checkAddr(pr2, h2, key, -(i + 2), 0, compressed);
+      if (prefixes[pr3].items) checkAddr(pr3, h3, key, -(i + 3), 0, compressed);
+    } else {
+      checkAddrSSE(h0, h1, h2, h3, -i, -(i + 1), -(i + 2), -(i + 3), key, 0, compressed);
+    }
   }
 
   // Endomorphism #1
@@ -1205,28 +1273,33 @@ void VanitySearch::checkAddressesSSE(bool compressed,Int key, int i, Point p1, P
   pte1[3].y.ModNeg();
 
 
-  secp->GetHash160(searchType, compressed, pte1[0], pte1[1], pte1[2], pte1[3], h0, h1, h2, h3);
-
-  if (!hasPattern) {
-
-    pr0 = *(prefix_t *)h0;
-    pr1 = *(prefix_t *)h1;
-    pr2 = *(prefix_t *)h2;
-    pr3 = *(prefix_t *)h3;
-
-    if (prefixes[pr0].items)
-      checkAddr(pr0, h0, key, -i, 1, compressed);
-    if (prefixes[pr1].items)
-      checkAddr(pr1, h1, key, -(i + 1), 1, compressed);
-    if (prefixes[pr2].items)
-      checkAddr(pr2, h2, key, -(i + 2), 1, compressed);
-    if (prefixes[pr3].items)
-      checkAddr(pr3, h3, key, -(i + 3), 1, compressed);
-
+  if (searchType == NOSTR_NPUB) {
+    vector<string> addr = secp->GetNostrNpub(pte1[0], pte1[1], pte1[2], pte1[3]);
+    const char *s0 = addr[0].c_str(); const char *t0 = (addr[0].rfind("npub1", 0) == 0) ? (s0 + 5) : s0;
+    const char *s1 = addr[1].c_str(); const char *t1 = (addr[1].rfind("npub1", 0) == 0) ? (s1 + 5) : s1;
+    const char *s2 = addr[2].c_str(); const char *t2 = (addr[2].rfind("npub1", 0) == 0) ? (s2 + 5) : s2;
+    const char *s3 = addr[3].c_str(); const char *t3 = (addr[3].rfind("npub1", 0) == 0) ? (s3 + 5) : s3;
+    for (int k = 0; k < (int)inputPrefixes.size(); k++) {
+      const string &rawPref = inputPrefixes[k];
+      const char *p = rawPref.c_str();
+      if (rawPref.rfind("npub", 0) == 0) { p += 4; if (*p == '1') p++; }
+      size_t lp = strlen(p);
+      if (lp <= strlen(t0) && strncmp(t0, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] sym endo#1 t0 npub='%s' pattern='%s'\n", addr[0].c_str(), rawPref.c_str()); if (checkPrivKey(addr[0], key, -i, 1, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t1) && strncmp(t1, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] sym endo#1 t1 npub='%s' pattern='%s'\n", addr[1].c_str(), rawPref.c_str()); if (checkPrivKey(addr[1], key, -(i + 1), 1, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t2) && strncmp(t2, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] sym endo#1 t2 npub='%s' pattern='%s'\n", addr[2].c_str(), rawPref.c_str()); if (checkPrivKey(addr[2], key, -(i + 2), 1, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t3) && strncmp(t3, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] sym endo#1 t3 npub='%s' pattern='%s'\n", addr[3].c_str(), rawPref.c_str()); if (checkPrivKey(addr[3], key, -(i + 3), 1, compressed)) { nbFoundKey++; updateFound(); } }
+    }
   } else {
-
-    checkAddrSSE(h0, h1, h2, h3, -i, -(i + 1), -(i + 2), -(i + 3), key, 1, compressed);
-
+    secp->GetHash160(searchType, compressed, pte1[0], pte1[1], pte1[2], pte1[3], h0, h1, h2, h3);
+    if (!hasPattern) {
+      pr0 = *(prefix_t *)h0; pr1 = *(prefix_t *)h1; pr2 = *(prefix_t *)h2; pr3 = *(prefix_t *)h3;
+      if (prefixes[pr0].items) checkAddr(pr0, h0, key, -i, 1, compressed);
+      if (prefixes[pr1].items) checkAddr(pr1, h1, key, -(i + 1), 1, compressed);
+      if (prefixes[pr2].items) checkAddr(pr2, h2, key, -(i + 2), 1, compressed);
+      if (prefixes[pr3].items) checkAddr(pr3, h3, key, -(i + 3), 1, compressed);
+    } else {
+      checkAddrSSE(h0, h1, h2, h3, -i, -(i + 1), -(i + 2), -(i + 3), key, 1, compressed);
+    }
   }
 
   // Endomorphism #2
@@ -1236,28 +1309,33 @@ void VanitySearch::checkAddressesSSE(bool compressed,Int key, int i, Point p1, P
   pte2[2].y.ModNeg();
   pte2[3].y.ModNeg();
 
-  secp->GetHash160(searchType, compressed, pte2[0], pte2[1], pte2[2], pte2[3], h0, h1, h2, h3);
-
-  if (!hasPattern) {
-
-    pr0 = *(prefix_t *)h0;
-    pr1 = *(prefix_t *)h1;
-    pr2 = *(prefix_t *)h2;
-    pr3 = *(prefix_t *)h3;
-
-    if (prefixes[pr0].items)
-      checkAddr(pr0, h0, key, -i, 2, compressed);
-    if (prefixes[pr1].items)
-      checkAddr(pr1, h1, key, -(i + 1), 2, compressed);
-    if (prefixes[pr2].items)
-      checkAddr(pr2, h2, key, -(i + 2), 2, compressed);
-    if (prefixes[pr3].items)
-      checkAddr(pr3, h3, key, -(i + 3), 2, compressed);
-
+  if (searchType == NOSTR_NPUB) {
+    vector<string> addr = secp->GetNostrNpub(pte2[0], pte2[1], pte2[2], pte2[3]);
+    const char *s0 = addr[0].c_str(); const char *t0 = (addr[0].rfind("npub1", 0) == 0) ? (s0 + 5) : s0;
+    const char *s1 = addr[1].c_str(); const char *t1 = (addr[1].rfind("npub1", 0) == 0) ? (s1 + 5) : s1;
+    const char *s2 = addr[2].c_str(); const char *t2 = (addr[2].rfind("npub1", 0) == 0) ? (s2 + 5) : s2;
+    const char *s3 = addr[3].c_str(); const char *t3 = (addr[3].rfind("npub1", 0) == 0) ? (s3 + 5) : s3;
+    for (int k = 0; k < (int)inputPrefixes.size(); k++) {
+      const string &rawPref = inputPrefixes[k];
+      const char *p = rawPref.c_str();
+      if (rawPref.rfind("npub", 0) == 0) { p += 4; if (*p == '1') p++; }
+      size_t lp = strlen(p);
+      if (lp <= strlen(t0) && strncmp(t0, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] sym endo#2 t0 npub='%s' pattern='%s'\n", addr[0].c_str(), rawPref.c_str()); if (checkPrivKey(addr[0], key, -i, 2, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t1) && strncmp(t1, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] sym endo#2 t1 npub='%s' pattern='%s'\n", addr[1].c_str(), rawPref.c_str()); if (checkPrivKey(addr[1], key, -(i + 1), 2, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t2) && strncmp(t2, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] sym endo#2 t2 npub='%s' pattern='%s'\n", addr[2].c_str(), rawPref.c_str()); if (checkPrivKey(addr[2], key, -(i + 2), 2, compressed)) { nbFoundKey++; updateFound(); } }
+      if (lp <= strlen(t3) && strncmp(t3, p, lp) == 0) { vs_debug_logf("[checkAddressesSSE] sym endo#2 t3 npub='%s' pattern='%s'\n", addr[3].c_str(), rawPref.c_str()); if (checkPrivKey(addr[3], key, -(i + 3), 2, compressed)) { nbFoundKey++; updateFound(); } }
+    }
   } else {
-
-    checkAddrSSE(h0, h1, h2, h3, -i, -(i + 1), -(i + 2), -(i + 3), key, 2, compressed);
-
+    secp->GetHash160(searchType, compressed, pte2[0], pte2[1], pte2[2], pte2[3], h0, h1, h2, h3);
+    if (!hasPattern) {
+      pr0 = *(prefix_t *)h0; pr1 = *(prefix_t *)h1; pr2 = *(prefix_t *)h2; pr3 = *(prefix_t *)h3;
+      if (prefixes[pr0].items) checkAddr(pr0, h0, key, -i, 2, compressed);
+      if (prefixes[pr1].items) checkAddr(pr1, h1, key, -(i + 1), 2, compressed);
+      if (prefixes[pr2].items) checkAddr(pr2, h2, key, -(i + 2), 2, compressed);
+      if (prefixes[pr3].items) checkAddr(pr3, h3, key, -(i + 3), 2, compressed);
+    } else {
+      checkAddrSSE(h0, h1, h2, h3, -i, -(i + 1), -(i + 2), -(i + 3), key, 2, compressed);
+    }
   }
 
 }
@@ -1524,13 +1602,20 @@ void VanitySearch::FindKeyGPU(TH_PARAM *ph) {
 
   g.SetSearchMode(searchMode);
   g.SetSearchType(searchType);
-  if (onlyFull) {
-    g.SetPrefix(usedPrefixL,nbPrefix);
+  if (searchType == NOSTR_NPUB) {
+    // NostrはGPU側で文字列パターン照合を行うため、ワイルドカード有無に関わらずパターン文字列を渡す
+    g.SetPattern(inputPrefixes[0].c_str());
+    vs_debug_logf("[FindKeyGPU] SetPattern '%s' (gpuId=%d grid=%dx%d threads=%d)\n",
+                  inputPrefixes[0].c_str(), ph->gpuId, ph->gridSizeX, ph->gridSizeY, nbThread);
   } else {
-    if(hasPattern)
-      g.SetPattern(inputPrefixes[0].c_str());
-    else
-      g.SetPrefix(usedPrefix);
+    if (onlyFull) {
+      g.SetPrefix(usedPrefixL, nbPrefix);
+    } else {
+      if (hasPattern)
+        g.SetPattern(inputPrefixes[0].c_str());
+      else
+        g.SetPrefix(usedPrefix);
+    }
   }
 
   getGPUStartingKeys(thId, g.GetGroupSize(), nbThread, keys, p);
@@ -1550,11 +1635,70 @@ void VanitySearch::FindKeyGPU(TH_PARAM *ph) {
 
     // Call kernel
     ok = g.Launch(found);
+    if (!ok) {
+      vs_debug_logf("[FindKeyGPU] Launch returned false.\n");
+    }
 
     for(int i=0;i<(int)found.size() && !endOfSearch;i++) {
 
       ITEM it = found[i];
-      checkAddr(*(prefix_t *)(it.hash), it.hash, keys[it.thId], it.incr, it.endo, it.mode);
+
+      if (searchType == NOSTR_NPUB) {
+        // Reconstruct public key for the found item and output npub
+        Int baseKey = keys[it.thId];
+        Int k(&baseKey);
+        Point sp = startPubKey;
+
+        if (it.incr < 0) {
+          k.Add((uint64_t)(-it.incr));
+          k.Neg();
+          k.Add(&secp->order);
+          if (startPubKeySpecified) sp.y.ModNeg();
+        } else {
+          k.Add((uint64_t)it.incr);
+        }
+
+        switch (it.endo) {
+          case 1:
+            k.ModMulK1order(&lambda);
+            if (startPubKeySpecified) sp.x.ModMulK1(&beta);
+            break;
+          case 2:
+            k.ModMulK1order(&lambda2);
+            if (startPubKeySpecified) sp.x.ModMulK1(&beta2);
+            break;
+        }
+
+        Point p = secp->ComputePublicKey(&k);
+        if (startPubKeySpecified) p = secp->AddDirect(p, sp);
+        string addr = secp->GetNostrNpub(p);
+        vs_debug_logf("[FindKeyGPU] candidate th=%u incr=%d endo=%d npub='%s'\n", it.thId, it.incr, it.endo, addr.c_str());
+
+        // Host-side recheck: ensure npub actually matches requested prefix
+        bool matched = false;
+        const char *full = addr.c_str();
+        const char *npubSuffix = (addr.rfind("npub1", 0) == 0) ? (full + 5) : full;
+        for (int k = 0; k < (int)inputPrefixes.size() && !matched; k++) {
+          const string &rawPref = inputPrefixes[k];
+          const char *patt = rawPref.c_str();
+          if (rawPref.rfind("npub", 0) == 0) { patt += 4; if (*patt == '1') patt++; }
+          size_t lp = strlen(patt);
+          if (lp <= strlen(npubSuffix) && strncmp(npubSuffix, patt, lp) == 0) {
+            matched = true;
+          }
+        }
+        if (!matched) {
+          vs_debug_logf("[FindKeyGPU] host-filter DROP npub='%s' (does not match requested prefix)\n", addr.c_str());
+          continue;
+        }
+
+        if (checkPrivKey(addr, baseKey, it.incr, it.endo, it.mode)) {
+          nbFoundKey++;
+          updateFound();
+        }
+      } else {
+        checkAddr(*(prefix_t *)(it.hash), it.hash, keys[it.thId], it.incr, it.endo, it.mode);
+      }
 
     }
 
@@ -1639,6 +1783,8 @@ uint64_t VanitySearch::getCPUCount() {
 // ----------------------------------------------------------------------------
 
 void VanitySearch::Search(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize) {
+
+
 
   double t0;
   double t1;

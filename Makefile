@@ -31,8 +31,8 @@ OBJET = $(addprefix $(OBJDIR)/, \
 endif
 
 CXX        = g++
-CUDA       = /usr/local/cuda-8.0
-CXXCUDA    = /usr/bin/g++-4.8
+CUDA       = /usr/local/cuda
+CXXCUDA    = /usr/bin/g++
 NVCC       = $(CUDA)/bin/nvcc
 # nvcc requires joint notation w/o dot, i.e. "5.2" -> "52"
 ccap       = $(shell echo $(CCAP) | tr -d '.')
@@ -75,7 +75,14 @@ VanitySearch: $(OBJET)
 	@echo Making VanitySearch...
 	$(CXX) $(OBJET) $(LFLAGS) -o VanitySearch
 
+# Ensure object files depend on directory creation
 $(OBJET): | $(OBJDIR) $(OBJDIR)/GPU $(OBJDIR)/hash
+
+# Add dependency for source files to force recompilation when switching between gpu/cpu
+$(OBJDIR)/main.o: main.cpp
+$(OBJDIR)/Vanity.o: Vanity.cpp 
+$(OBJDIR)/SECP256K1.o: SECP256K1.cpp
+$(OBJDIR)/Bech32.o: Bech32.cpp
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
@@ -91,4 +98,18 @@ clean:
 	@rm -f obj/*.o
 	@rm -f obj/GPU/*.o
 	@rm -f obj/hash/*.o
+	@rm -f VanitySearch
+
+# Force rebuild when switching between CPU and GPU modes
+.PHONY: clean all VanitySearch gpu cpu
+
+# CPU-only build
+cpu:
+	$(MAKE) clean
+	$(MAKE) VanitySearch
+
+# GPU build  
+gpu:
+	$(MAKE) clean
+	$(MAKE) VanitySearch gpu=1
 

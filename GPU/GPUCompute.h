@@ -1,3 +1,16 @@
+__device__ __forceinline__ void _ExtractXWords(uint64_t *px, uint32_t outW[8]) {
+  // Build the 8 big-endian 32-bit words corresponding to the 32-byte X coordinate
+  // Mirror of encoding used in _GetHash160Comp
+  uint32_t *x32 = (uint32_t *)(px);
+  outW[0] = __byte_perm(x32[7], x32[6], 0x0765);
+  outW[1] = __byte_perm(x32[6], x32[5], 0x0765);
+  outW[2] = __byte_perm(x32[5], x32[4], 0x0765);
+  outW[3] = __byte_perm(x32[4], x32[3], 0x0765);
+  outW[4] = __byte_perm(x32[3], x32[2], 0x0765);
+  outW[5] = __byte_perm(x32[2], x32[1], 0x0765);
+  outW[6] = __byte_perm(x32[1], x32[0], 0x0765);
+  outW[7] = __byte_perm(x32[0], 0,      0x0765);
+}
 /*
  * This file is part of the VanitySearch distribution (https://github.com/JeanLucPons/VanitySearch).
  * Copyright (c) 2019 Jean Luc PONS.
@@ -250,6 +263,221 @@ __device__ __noinline__ void CheckP2SHHash(uint32_t mode, prefix_t *prefix, uint
 #define CHECK_PREFIX(incr) CheckHash(mode, sPrefix, px, py, j*GRP_SIZE + (incr), lookup32, maxFound, out)
 
 // -----------------------------------------------------------------------------------------
+
+// Nostr npub prefix matching (pattern mode only). We generate the bech32 data part characters
+// from 32-byte X coordinate (NO version byte) and compare the leading
+// characters with the provided pattern ("npub" and optional '1' stripped).
+
+__device__ __constant__ char _bech32_charset[] = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+__device__ __forceinline__ int _GenNpubDataChars(uint64_t *px, char *outChars, int maxChars) {
+  // Convert 32 bytes X from 8-bit to 5-bit groups (pad) and map to charset
+  // Returns number of chars written (at least maxChars if maxChars<=produced)
+  // Extract X bytes as big-endian sequence using __byte_perm mapping
+  int bytesCount = 32;
+  unsigned char b[32];
+  uint32_t W[8];
+  _ExtractXWords(px, W);
+  #pragma unroll
+  for (int w = 0; w < 8; w++) {
+    uint32_t wi = W[w];
+    b[4*w + 0] = (unsigned char)((wi >> 24) & 0xFF);
+    b[4*w + 1] = (unsigned char)((wi >> 16) & 0xFF);
+    b[4*w + 2] = (unsigned char)((wi >> 8) & 0xFF);
+    b[4*w + 3] = (unsigned char)(wi & 0xFF);
+  }
+  // convertbits 8->5 with padding
+  int acc = 0;
+  int bits = 0;
+  int outLen = 0;
+  #pragma unroll
+  for (int i = 0; i < bytesCount && outLen < maxChars; i++) {
+    acc = (acc << 8) | b[i];
+    bits += 8;
+    while (bits >= 5 && outLen < maxChars) {
+      int idx = (acc >> (bits - 5)) & 31;
+      outChars[outLen++] = _bech32_charset[idx];
+      bits -= 5;
+    }
+  }
+  // output padding for leftover bits (BIP-173 compliant for data payloads)
+  if (bits && outLen < maxChars) {
+    int idx = (acc << (5 - bits)) & 31;
+    outChars[outLen++] = _bech32_charset[idx];
+  }
+  return outLen;
+}
+
+__device__ __forceinline__ bool _MatchNpubPattern(uint64_t *px, const char *pattern) {
+  // Normalize pattern: skip optional "npub" and optional '1', lowercase
+  const char *p = pattern;
+  if (p[0]=='n' || p[0]=='N') {
+    if ((p[1]=='p'||p[1]=='P') && (p[2]=='u'||p[2]=='U') && (p[3]=='b'||p[3]=='B')) {
+      p += 4;
+      if (*p=='1') p++;
+    }
+  }
+  // Determine needed length
+  int need = 0;
+  while (p[need] && need < 60) need++;
+  if (need == 0) return false;
+  char buf[64];
+  int got = _GenNpubDataChars(px, buf, need);
+  if (got < need) return false;
+  // Compare lowercase
+  for (int i = 0; i < need; i++) {
+    char c = p[i];
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if (buf[i] != c) return false;
+  }
+  return true;
+}
+
+__device__ __noinline__ void CheckNpubPrefix(uint64_t *px, int32_t incr, int32_t endo, uint32_t maxFound, uint32_t *out, const char *pattern) {
+  if (_MatchNpubPattern(px, pattern)) {
+    uint32_t tid = (blockIdx.x*blockDim.x) + threadIdx.x;
+    uint32_t pos = atomicAdd(out, 1);
+    if (pos < maxFound) {
+      out[pos*ITEM_SIZE32 + 1] = tid;
+      out[pos*ITEM_SIZE32 + 2] = (uint32_t)(incr << 16) | (uint32_t)(1 << 15) | (uint32_t)(endo);
+      // Fill hash words with zeros (unused for Nostr path)
+      out[pos*ITEM_SIZE32 + 3] = 0;
+      out[pos*ITEM_SIZE32 + 4] = 0;
+      out[pos*ITEM_SIZE32 + 5] = 0;
+      out[pos*ITEM_SIZE32 + 6] = 0;
+      out[pos*ITEM_SIZE32 + 7] = 0;
+    }
+  }
+}
+
+__device__ void ComputeKeysNostrPattern(uint64_t *startx, uint64_t *starty,
+                             const char *pattern, uint32_t maxFound, uint32_t *out) {
+
+  uint64_t dx[GRP_SIZE/2+1][4];
+  uint64_t px[4];
+  uint64_t py[4];
+  uint64_t pyn[4];
+  uint64_t sx[4];
+  uint64_t sy[4];
+  uint64_t dy[4];
+  uint64_t _s[4];
+  uint64_t _p2[4];
+  uint64_t pe1x[4];
+  uint64_t pe2x[4];
+
+  // Load starting key
+  __syncthreads();
+  Load256A(sx, startx);
+  Load256A(sy, starty);
+  Load256(px, sx);
+  Load256(py, sy);
+
+  for (uint32_t j = 0; j < STEP_SIZE / GRP_SIZE; j++) {
+
+    // Fill group with delta x
+    uint32_t i;
+    for (i = 0; i < HSIZE; i++)
+      ModSub256(dx[i], Gx[i], sx);
+    ModSub256(dx[i] , Gx[i], sx);  // For the first point
+    ModSub256(dx[i+1],_2Gnx, sx);  // For the next center point
+
+    // Compute modular inverse
+    _ModInvGrouped(dx);
+
+    // Check starting point (center)
+    // base point
+    _ModMult(pe1x, px, _beta);
+    _ModMult(pe2x, px, _beta2);
+    CheckNpubPrefix(px,  j*GRP_SIZE + (GRP_SIZE/2), 0, maxFound, out, pattern);
+    CheckNpubPrefix(pe1x, j*GRP_SIZE + (GRP_SIZE/2), 1, maxFound, out, pattern);
+    CheckNpubPrefix(pe2x, j*GRP_SIZE + (GRP_SIZE/2), 2, maxFound, out, pattern);
+
+    ModNeg256(pyn,py);
+
+    for(i = 0; i < HSIZE; i++) {
+
+      __syncthreads();
+      // P = StartPoint + i*G
+      Load256(px, sx);
+      Load256(py, sy);
+      ModSub256(dy, Gy[i], py);
+
+      _ModMult(_s, dy, dx[i]);      //  s = (p2.y-p1.y)*inverse(p2.x-p1.x)
+      _ModSqr(_p2, _s);             // _p2 = pow2(s)
+
+      ModSub256(px, _p2,px);
+      ModSub256(px, Gx[i]);         // px = pow2(s) - p1.x - p2.x;
+
+      _ModMult(pe1x, px, _beta);
+      _ModMult(pe2x, px, _beta2);
+      CheckNpubPrefix(px,  j*GRP_SIZE + (GRP_SIZE/2 + (i + 1)), 0, maxFound, out, pattern);
+      CheckNpubPrefix(pe1x, j*GRP_SIZE + (GRP_SIZE/2 + (i + 1)), 1, maxFound, out, pattern);
+      CheckNpubPrefix(pe2x, j*GRP_SIZE + (GRP_SIZE/2 + (i + 1)), 2, maxFound, out, pattern);
+
+      __syncthreads();
+      // P = StartPoint - i*G, if (x,y) = i*G then (x,-y) = -i*G
+      Load256(px, sx);
+      ModSub256(dy,pyn,Gy[i]);
+
+      _ModMult(_s, dy, dx[i]);      //  s = (p2.y-p1.y)*inverse(p2.x-p1.x)
+      _ModSqr(_p2, _s);             // _p = pow2(s)
+
+      ModSub256(px, _p2, px);
+      ModSub256(px, Gx[i]);         // px = pow2(s) - p1.x - p2.x;
+
+      _ModMult(pe1x, px, _beta);
+      _ModMult(pe2x, px, _beta2);
+      CheckNpubPrefix(px,  j*GRP_SIZE + (GRP_SIZE/2 - (i + 1)), 0, maxFound, out, pattern);
+      CheckNpubPrefix(pe1x, j*GRP_SIZE + (GRP_SIZE/2 - (i + 1)), 1, maxFound, out, pattern);
+      CheckNpubPrefix(pe2x, j*GRP_SIZE + (GRP_SIZE/2 - (i + 1)), 2, maxFound, out, pattern);
+
+    }
+
+    __syncthreads();
+    // First point (startP - (GRP_SZIE/2)*G)
+    Load256(px, sx);
+    Load256(py, sy);
+    ModNeg256(dy, Gy[i]);
+    ModSub256(dy, py);
+
+    _ModMult(_s, dy, dx[i]);      //  s = (p2.y-p1.y)*inverse(p2.x-p1.x)
+    _ModSqr(_p2,_s);              // _p = pow2(s)
+
+    ModSub256(px, _p2, px);
+    ModSub256(px, Gx[i]);         // px = pow2(s) - p1.x - p2.x;
+
+    _ModMult(pe1x, px, _beta);
+    _ModMult(pe2x, px, _beta2);
+    CheckNpubPrefix(px,  j*GRP_SIZE + (0), 0, maxFound, out, pattern);
+    CheckNpubPrefix(pe1x, j*GRP_SIZE + (0), 1, maxFound, out, pattern);
+    CheckNpubPrefix(pe2x, j*GRP_SIZE + (0), 2, maxFound, out, pattern);
+
+    i++;
+
+    __syncthreads();
+    // Next start point (startP + GRP_SIZE*G)
+    Load256(px, sx);
+    Load256(py, sy);
+    ModSub256(dy, _2Gny, py);
+
+    _ModMult(_s, dy, dx[i]);      //  s = (p2.y-p1.y)*inverse(p2.x-p1.x)
+    _ModSqr(_p2, _s);             // _p2 = pow2(s)
+
+    ModSub256(px, _p2, px);
+    ModSub256(px, _2Gnx);         // px = pow2(s) - p1.x - p2.x;
+
+    ModSub256(py, _2Gnx, px);
+    _ModMult(py, _s);             // py = - s*(ret.x-p2.x)
+    ModSub256(py, _2Gny);         // py = - p2.y - s*(ret.x-p2.x);
+
+  }
+
+  // Update starting point
+  __syncthreads();
+  Store256A(startx, px);
+  Store256A(starty, py);
+}
+
 
 __device__ void ComputeKeys(uint32_t mode, uint64_t *startx, uint64_t *starty,
                             prefix_t *sPrefix, uint32_t *lookup32, uint32_t maxFound, uint32_t *out) {

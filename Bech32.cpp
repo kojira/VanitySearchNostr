@@ -84,6 +84,15 @@ int bech32_encode(char *output, const char *hrp, const uint8_t *data, size_t dat
   return 1;
 }
 
+int bech32_encode_data(char *output, const char *hrp, const uint8_t *bytes, size_t bytes_len) {
+  // Convert 8->5 with padding, then encode
+  uint8_t data[128];
+  size_t data_len = 0;
+  if (!bytes || bytes_len == 0) return 0;
+  if (!convert_bits(data, &data_len, 5, bytes, bytes_len, 8, 1)) return 0;
+  return bech32_encode(output, hrp, data, data_len);
+}
+
 int bech32_decode_nocheck(uint8_t *data, size_t *data_len, const char *input) {
 
   uint8_t acc=0;
@@ -176,7 +185,7 @@ int bech32_decode(char* hrp, uint8_t *data, size_t *data_len, const char *input)
   return chk == 1;
 }
 
-static int convert_bits(uint8_t* out, size_t* outlen, int outbits, const uint8_t* in, size_t inlen, int inbits, int pad) {
+int convert_bits(uint8_t* out, size_t* outlen, int outbits, const uint8_t* in, size_t inlen, int inbits, int pad) {
   uint32_t val = 0;
   int bits = 0;
   uint32_t maxv = (((uint32_t)1) << outbits) - 1;

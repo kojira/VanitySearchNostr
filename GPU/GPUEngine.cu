@@ -78,6 +78,12 @@ __global__ void comp_keys_p2sh_pattern(uint32_t mode, prefix_t *pattern, uint64_
 
 }
 
+__global__ void comp_keys_nostr_pattern(uint64_t *keys, uint32_t maxFound, uint32_t *found, const char *pattern) {
+  int xPtr = (blockIdx.x*blockDim.x) * 8;
+  int yPtr = xPtr + 4 * blockDim.x;
+  ComputeKeysNostrPattern(keys + xPtr, keys + yPtr, (const char *)pattern, maxFound, found);
+}
+
 //#define FULLCHECK
 #ifdef FULLCHECK
 
@@ -471,22 +477,22 @@ bool GPUEngine::callKernel() {
 
   } else {
 
-    // P2PKH or BECH32
+    // P2PKH or BECH32 or NOSTR_NPUB
     if (hasPattern) {
       if (searchType == BECH32) {
-        // TODO
         printf("GPUEngine: (TODO) BECH32 not yet supported with wildard\n");
         return false;
       }
-      comp_keys_pattern << < nbThread / nbThreadPerGroup, nbThreadPerGroup >> >
-        (searchMode, inputPrefix, inputKey, maxFound, outputPrefix);
+      if (searchType == NOSTR_NPUB) {
+        comp_keys_nostr_pattern <<< nbThread / nbThreadPerGroup, nbThreadPerGroup >>> (inputKey, maxFound, outputPrefix, (const char *)inputPrefix);
+      } else {
+        comp_keys_pattern <<< nbThread / nbThreadPerGroup, nbThreadPerGroup >>> (searchMode, inputPrefix, inputKey, maxFound, outputPrefix);
+      }
     } else {
       if (searchMode == SEARCH_COMPRESSED) {
-        comp_keys_comp << < nbThread / nbThreadPerGroup, nbThreadPerGroup >> >
-          (inputPrefix, inputPrefixLookUp, inputKey, maxFound, outputPrefix);
+        comp_keys_comp <<< nbThread / nbThreadPerGroup, nbThreadPerGroup >>> (inputPrefix, inputPrefixLookUp, inputKey, maxFound, outputPrefix);
       } else {
-        comp_keys << < nbThread / nbThreadPerGroup, nbThreadPerGroup >> >
-          (searchMode, inputPrefix, inputPrefixLookUp, inputKey, maxFound, outputPrefix);
+        comp_keys <<< nbThread / nbThreadPerGroup, nbThreadPerGroup >>> (searchMode, inputPrefix, inputPrefixLookUp, inputKey, maxFound, outputPrefix);
       }
     }
 

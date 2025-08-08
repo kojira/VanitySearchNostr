@@ -33,12 +33,12 @@ using namespace std;
 
 void printUsage() {
 
-  printf("VanitySeacrh [-check] [-v] [-u] [-b] [-c] [-gpu] [-stop] [-i inputfile]\n");
-  printf("             [-gpuId gpuId1[,gpuId2,...]] [-g g1x,g1y,[,g2x,g2y,...]]\n");
-  printf("             [-o outputfile] [-m maxFound] [-ps seed] [-s seed] [-t nbThread]\n");
-  printf("             [-nosse] [-r rekey] [-check] [-kp] [-sp startPubKey]\n");
-  printf("             [-rp privkey partialkeyfile] [prefix]\n\n");
-  printf(" prefix: prefix to search (Can contains wildcard '?' or '*')\n");
+  printf("VanitySearchNostr [-check] [-v] [-u] [-b] [-c] [-gpu] [-stop] [-i inputfile]\n");
+  printf("                  [-gpuId gpuId1[,gpuId2,...]] [-g g1x,g1y,[,g2x,g2y,...]]\n");
+  printf("                  [-o outputfile] [-m maxFound] [-ps seed] [-s seed] [-t nbThread]\n");
+  printf("                  [-nosse] [-r rekey] [-check] [-kp] [-sp startPubKey]\n");
+  printf("                  [-rp privkey partialkeyfile] [npub_prefix]\n\n");
+  printf(" npub_prefix: Nostr npub prefix to search (Can contains wildcard '?' or '*')\n");
   printf(" -v: Print version\n");
   printf(" -u: Search uncompressed addresses\n");
   printf(" -b: Search both uncompressed or compressed addresses\n");
@@ -271,17 +271,11 @@ void reconstructAdd(Secp256K1 *secp, string fileName, string outputFile, string 
 
       addr = lines[i].substr(12);
 
-      switch (addr.data()[0]) {
-      case '1':
-        addrType = P2PKH; break;
-      case '3':
-        addrType = P2SH; break;
-      case 'b':
-      case 'B':
-        addrType = BECH32; break;
-      default:
+      if (addr.substr(0, 4) == "npub") {
+        addrType = NOSTR_NPUB;
+      } else {
         printf("Invalid partialkey info file at line %d\n", i);
-        printf("%s Address format not supported\n", addr.c_str());
+        printf("%s Only Nostr npub format supported\n", addr.c_str());
         continue;
       }
 
@@ -366,6 +360,8 @@ void reconstructAdd(Secp256K1 *secp, string fileName, string outputFile, string 
 // ------------------------------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
+
+
 
   // Global Init
   Timer::Init();
@@ -458,9 +454,7 @@ int main(int argc, char* argv[]) {
       string pub = string(argv[a]);
       bool isComp;
       Point p = secp->ParsePublicKeyHex(pub,isComp);
-      printf("Addr (P2PKH): %s\n",secp->GetAddress(P2PKH,isComp,p).c_str());
-      printf("Addr (P2SH): %s\n",secp->GetAddress(P2SH,isComp,p).c_str());
-      printf("Addr (BECH32): %s\n",secp->GetAddress(BECH32,isComp,p).c_str());
+      printf("Nostr npub: %s\n",secp->GetNostrNpub(p).c_str());
       exit(0);
     } else if (strcmp(argv[a], "-cp") == 0) {
       a++;
@@ -475,9 +469,7 @@ int main(int argc, char* argv[]) {
       Point p = secp->ComputePublicKey(&k);
       printf("PrivAddr: p2pkh:%s\n",secp->GetPrivAddress(isComp,k).c_str());
       printf("PubKey: %s\n",secp->GetPublicKeyHex(isComp,p).c_str());
-      printf("Addr (P2PKH): %s\n", secp->GetAddress(P2PKH,isComp,p).c_str());
-      printf("Addr (P2SH): %s\n", secp->GetAddress(P2SH,isComp,p).c_str());
-      printf("Addr (BECH32): %s\n", secp->GetAddress(BECH32,isComp,p).c_str());
+      printf("Nostr npub: %s\n", secp->GetNostrNpub(p).c_str());
       exit(0);
     } else if (strcmp(argv[a], "-rp") == 0) {
       a++;
