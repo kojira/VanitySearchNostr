@@ -21,38 +21,229 @@
 #include "Base58.h"
 #include "Bech32.h"
 #include <string.h>
+#include <time.h>
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <stdio.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <stdlib.h>
+#ifdef STATIC_GTABLE
+#include "k1_gtable.v1.inc"
+#endif
 
+// libsecp256k1 bridge (C linkage)
+#ifdef USE_LIBSECP256K1
+extern "C" bool secp_bridge_compute_pubkey(const Int &k, Point &out);
+#endif
 Secp256K1::Secp256K1() {
 }
 
 void Secp256K1::Init() {
 
+  printf("DEBUG: SECP256K1::Init() starting...\n");
+  fflush(stdout);
+
   // Prime for the finite field
   Int P;
   P.SetBase16("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
 
-  // Set up field
-  Int::SetupField(&P);
-
   // Generator point and order
+  printf("DEBUG: Setting generator point and order...\n");
+  fflush(stdout);
   G.x.SetBase16("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798");
   G.y.SetBase16("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8");
   G.z.SetInt32(1);
   order.SetBase16("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
 
+  printf("DEBUG: Initializing K1 with order...\n");
+  fflush(stdout);
   Int::InitK1(&order);
+  printf("DEBUG: K1 initialization completed.\n");
+  fflush(stdout);
 
-  // Compute Generator table
-  Point N(G);
-  for(int i = 0; i < 32; i++) {
-    GTable[i * 256] = N;
-    N = DoubleDirect(N);
-    for (int j = 1; j < 255; j++) {
-      GTable[i * 256 + j] = N;
-      N = AddDirect(N, GTable[i * 256]);
+  // Set up field (ALWAYS required for Point operations)
+  printf("DEBUG: Setting up field...\n");
+  fflush(stdout);
+  Int::SetupField(&P);
+  printf("DEBUG: Field setup completed.\n");
+  fflush(stdout);
+
+#ifdef STATIC_GTABLE
+  printf("DEBUG: STATIC_GTABLE is defined - loading embedded table...\n");
+  fflush(stdout);
+  // Load statically embedded table
+  {
+    // k1_gtable_raw: [256*32][15] = x(5) + y(5) + z(5) limbs
+    for (int i = 0; i < 256*32; i++) {
+      for (int k = 0; k < NB64BLOCK; k++) GTable[i].x.bits64[k] = k1_gtable_raw[i][0 + k];
+      for (int k = 0; k < NB64BLOCK; k++) GTable[i].y.bits64[k] = k1_gtable_raw[i][5 + k];
+      for (int k = 0; k < NB64BLOCK; k++) GTable[i].z.bits64[k] = k1_gtable_raw[i][10 + k];
     }
-    GTable[i * 256 + 255] = N; // Dummy point for check function
+    printf("Loaded secp256k1 static table (%d points).\n", 256*32);
+    fflush(stdout);
+    return;
   }
+#endif
+
+  printf("DEBUG: STATIC_GTABLE not defined, using cache/generation path...\n");
+  fflush(stdout);
+
+  // Try to load cached table
+  auto tryLoadCache = [&]() -> bool {
+    const char *cacheFile = getenv("VS_K1_CACHE");
+    if (!cacheFile || cacheFile[0] == '\0') cacheFile = "k1_gtable.v1.bin";
+    FILE *fp = fopen(cacheFile, "rb");
+    if (!fp) return false;
+    struct Header { char magic[8]; uint32_t version; uint32_t nbPoints; uint32_t limbCount; uint32_t reserved; uint64_t checksum; } hdr{};
+    if (fread(&hdr, sizeof(hdr), 1, fp) != 1) { fclose(fp); return false; }
+    if (memcmp(hdr.magic, "K1GTBL\0", 7) != 0) { fclose(fp); return false; }
+    if (hdr.version != 1 || hdr.nbPoints != 256*32 || hdr.limbCount != NB64BLOCK) { fclose(fp); return false; }
+    uint64_t sum = 0;
+    for (int i = 0; i < 256*32; i++) {
+      if (fread(GTable[i].x.bits64, sizeof(uint64_t), NB64BLOCK, fp) != (size_t)NB64BLOCK) { fclose(fp); return false; }
+      if (fread(GTable[i].y.bits64, sizeof(uint64_t), NB64BLOCK, fp) != (size_t)NB64BLOCK) { fclose(fp); return false; }
+      if (fread(GTable[i].z.bits64, sizeof(uint64_t), NB64BLOCK, fp) != (size_t)NB64BLOCK) { fclose(fp); return false; }
+      for (int k = 0; k < NB64BLOCK; k++) { sum += GTable[i].x.bits64[k]; sum += GTable[i].y.bits64[k]; sum += GTable[i].z.bits64[k]; }
+    }
+    fclose(fp);
+    if (sum != hdr.checksum) { printf("Warning: K1 table cache checksum mismatch, recomputing...\n"); return false; }
+    printf("Loaded secp256k1 table cache (%u points).\n", hdr.nbPoints);
+    fflush(stdout);
+    return true;
+  };
+
+  auto saveCache = [&]() {
+    const char *cacheFile = getenv("VS_K1_CACHE");
+    if (!cacheFile || cacheFile[0] == '\0') cacheFile = "k1_gtable.v1.bin";
+    FILE *fp = fopen(cacheFile, "wb");
+    if (!fp) { printf("Warning: cannot write cache '%s'\n", cacheFile); return; }
+    struct Header { char magic[8]; uint32_t version; uint32_t nbPoints; uint32_t limbCount; uint32_t reserved; uint64_t checksum; } hdr{};
+    memcpy(hdr.magic, "K1GTBL\0", 7);
+    hdr.version = 1; hdr.nbPoints = 256*32; hdr.limbCount = NB64BLOCK; hdr.reserved = 0; hdr.checksum = 0;
+    fwrite(&hdr, sizeof(hdr), 1, fp);
+    uint64_t sum = 0;
+    for (int i = 0; i < 256*32; i++) {
+      fwrite(GTable[i].x.bits64, sizeof(uint64_t), NB64BLOCK, fp);
+      fwrite(GTable[i].y.bits64, sizeof(uint64_t), NB64BLOCK, fp);
+      fwrite(GTable[i].z.bits64, sizeof(uint64_t), NB64BLOCK, fp);
+      for (int k = 0; k < NB64BLOCK; k++) { sum += GTable[i].x.bits64[k]; sum += GTable[i].y.bits64[k]; sum += GTable[i].z.bits64[k]; }
+    }
+    hdr.checksum = sum;
+    fseek(fp, 0, SEEK_SET);
+    fwrite(&hdr, sizeof(hdr), 1, fp);
+    fclose(fp);
+    printf("Saved secp256k1 table cache.\n");
+    fflush(stdout);
+
+    // Optionally dump a .inc to embed statically (define STATIC_GTABLE to use)
+    const char *dumpInc = getenv("VS_K1_DUMP_INC");
+    if (dumpInc && dumpInc[0] != '\0') {
+      FILE *fi = fopen(dumpInc, "wb");
+      if (fi) {
+        fprintf(fi, "// auto-generated secp256k1 table\n");
+        fprintf(fi, "#pragma once\n");
+        fprintf(fi, "static const unsigned long long k1_gtable_raw[%u][15] = {\n", 256*32);
+        for (int i = 0; i < 256*32; i++) {
+          fprintf(fi, "  {");
+          for (int k = 0; k < NB64BLOCK; k++) fprintf(fi, "0x%016llxULL,", (unsigned long long)GTable[i].x.bits64[k]);
+          for (int k = 0; k < NB64BLOCK; k++) fprintf(fi, "0x%016llxULL,", (unsigned long long)GTable[i].y.bits64[k]);
+          for (int k = 0; k < NB64BLOCK; k++) {
+            fprintf(fi, "0x%016llxULL", (unsigned long long)GTable[i].z.bits64[k]);
+            if (k != NB64BLOCK-1) fprintf(fi, ",");
+          }
+          fprintf(fi, "}%s\n", (i==(256*32-1))?"":",");
+        }
+        fprintf(fi, "};\n");
+        fclose(fi);
+        printf("Dumped static table include to %s\n", dumpInc);
+        fflush(stdout);
+      }
+    }
+  };
+
+  if (tryLoadCache()) return;
+
+  // Compute Generator table in parallel per 32 blocks
+  printf("Initializing secp256k1 tables: 0/32 (0%%)\n");
+  fflush(stdout);
+  // Precompute block bases (sequential)
+  Point N(G);
+  for (int i = 0; i < 32; i++) { GTable[i * 256] = N; N = DoubleDirect(N); }
+
+  // Choose strategy: multi-process if VS_K1_PROCS>1, else multi-thread
+  int procs = 0; const char *envP = getenv("VS_K1_PROCS"); if (envP) procs = atoi(envP);
+  if (procs > 1) {
+    if (procs > 32) procs = 32;
+    // Shared temporary file for inter-process communication
+    const char *tmpPath = "k1_gtable.tmp";
+    int fd = open(tmpPath, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) { perror("open tmp"); exit(1); }
+    size_t totalPts = 256u*32u;
+    size_t sz = totalPts * sizeof(Point);
+    if (ftruncate(fd, (off_t)sz) != 0) { perror("ftruncate"); close(fd); exit(1); }
+    void *map = mmap(NULL, sz, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) { perror("mmap"); close(fd); exit(1); }
+    Point *shared = (Point *)map;
+    // Fork workers
+    std::vector<pid_t> pids;
+    pids.reserve(procs);
+    for (int p = 0; p < procs; p++) {
+      pid_t pid = fork();
+      if (pid == 0) {
+        // Child: compute blocks i where i % procs == p
+        for (int i = p; i < 32; i += procs) {
+          Point base = GTable[i * 256];
+          Point cur = DoubleDirect(base);
+          for (int j = 1; j < 255; j++) { shared[i * 256 + j] = cur; cur = AddDirect(cur, base); }
+          shared[i * 256 + 0] = base;
+          shared[i * 256 + 255] = cur;
+        }
+        _exit(0);
+      } else if (pid > 0) {
+        pids.push_back(pid);
+      } else {
+        perror("fork");
+        munmap(map, sz); close(fd); unlink(tmpPath); exit(1);
+      }
+    }
+    // Wait children
+    for (pid_t pid : pids) { int st=0; waitpid(pid, &st, 0); }
+    // Copy back to GTable
+    for (size_t idx = 0; idx < totalPts; idx++) { GTable[idx] = shared[idx]; }
+    munmap(map, sz); close(fd); unlink(tmpPath);
+    printf("Initializing secp256k1 tables: 32/32 (100%%)\nInitializing secp256k1 tables: done\n");
+    fflush(stdout);
+  } else {
+    std::atomic<int> nextI(0), doneI(0);
+    auto worker = [&]() {
+      while (true) {
+        int i = nextI.fetch_add(1);
+        if (i >= 32) break;
+        Point base = GTable[i * 256];
+        Point cur = DoubleDirect(base);
+        for (int j = 1; j < 255; j++) { GTable[i * 256 + j] = cur; cur = AddDirect(cur, base); }
+        GTable[i * 256 + 255] = cur;
+        int finished = doneI.fetch_add(1) + 1;
+        int pct = (int)((finished * 100.0) / 32.0 + 0.5);
+      printf("Initializing secp256k1 tables: %d/32 (%d%%)\n", finished, pct);
+        fflush(stdout);
+      }
+    };
+    unsigned int hw = std::thread::hardware_concurrency(); if (hw == 0) hw = 4; unsigned int th = hw; if (th > 32) th = 32;
+    std::vector<std::thread> ths; ths.reserve(th);
+    for (unsigned int t = 0; t < th; t++) ths.emplace_back(worker);
+    for (auto &t : ths) t.join();
+    printf("Initializing secp256k1 tables: done\n");
+    fflush(stdout);
+  }
+  printf("Initializing secp256k1 tables: done\n");
+  fflush(stdout);
+  saveCache();
 
 }
 
@@ -170,6 +361,13 @@ void Secp256K1::Check() {
 
 
 Point Secp256K1::ComputePublicKey(Int *privKey) {
+#ifdef USE_LIBSECP256K1
+  // Bridge to libsecp256k1 (X-only). Fallback if bridge not available
+  Point bridgeQ;
+  if (secp_bridge_compute_pubkey(*privKey, bridgeQ)) {
+    return bridgeQ;
+  }
+#endif
 
   int i = 0;
   uint8_t b;
@@ -199,7 +397,8 @@ Point Secp256K1::ComputePublicKey(Int *privKey) {
 Point Secp256K1::NextKey(Point &key) {
   // Input key must be reduced and different from G
   // in order to use AddDirect
-  return AddDirect(key,G);
+  // Use Jacobian mixed-add to avoid per-step modular inverse
+  return Add2(key, G);
 }
 
 Int Secp256K1::DecodePrivateKey(char *key,bool *compressed) {
@@ -377,8 +576,27 @@ void Secp256K1::GetHash160(int type,bool compressed,
       KEYBUFFUNCOMP(b2, k2);
       KEYBUFFUNCOMP(b3, k3);
 
-      sha256sse_2B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
-      ripemd160sse_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
+      // On non-x86 (e.g., Apple Silicon), fall back to scalar SHA/RMD
+      #if defined(__x86_64__) || defined(_M_X64)
+        sha256sse_2B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
+        ripemd160sse_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
+  #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+        sha256_65((unsigned char*)b0, sh0);
+        sha256_65((unsigned char*)b1, sh1);
+        sha256_65((unsigned char*)b2, sh2);
+        sha256_65((unsigned char*)b3, sh3);
+        ripemd160_4way_neon(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
+  #else
+        // Portable fallback using existing scalar helpers
+        sha256_65((unsigned char*)b0, sh0);
+        sha256_65((unsigned char*)b1, sh1);
+        sha256_65((unsigned char*)b2, sh2);
+        sha256_65((unsigned char*)b3, sh3);
+        ripemd160_32(sh0, h0);
+        ripemd160_32(sh1, h1);
+        ripemd160_32(sh2, h2);
+        ripemd160_32(sh3, h3);
+  #endif
 
     } else {
 
@@ -392,8 +610,25 @@ void Secp256K1::GetHash160(int type,bool compressed,
       KEYBUFFCOMP(b2, k2);
       KEYBUFFCOMP(b3, k3);
 
-      sha256sse_1B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
-      ripemd160sse_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
+      #if defined(__x86_64__) || defined(_M_X64)
+        sha256sse_1B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
+        ripemd160sse_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
+      #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+        sha256_33((unsigned char*)b0, sh0);
+        sha256_33((unsigned char*)b1, sh1);
+        sha256_33((unsigned char*)b2, sh2);
+        sha256_33((unsigned char*)b3, sh3);
+        ripemd160_4way_neon(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
+      #else
+        sha256_33((unsigned char*)b0, sh0);
+        sha256_33((unsigned char*)b1, sh1);
+        sha256_33((unsigned char*)b2, sh2);
+        sha256_33((unsigned char*)b3, sh3);
+        ripemd160_32(sh0, h0);
+        ripemd160_32(sh1, h1);
+        ripemd160_32(sh2, h2);
+        ripemd160_32(sh3, h3);
+      #endif
 
     }
 
@@ -421,8 +656,25 @@ void Secp256K1::GetHash160(int type,bool compressed,
     KEYBUFFSCRIPT(b2, kh2);
     KEYBUFFSCRIPT(b3, kh3);
 
-    sha256sse_1B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
-    ripemd160sse_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
+    #if defined(__x86_64__) || defined(_M_X64)
+      sha256sse_1B(b0, b1, b2, b3, sh0, sh1, sh2, sh3);
+      ripemd160sse_32(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
+    #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+      sha256_33((unsigned char*)b0, sh0);
+      sha256_33((unsigned char*)b1, sh1);
+      sha256_33((unsigned char*)b2, sh2);
+      sha256_33((unsigned char*)b3, sh3);
+      ripemd160_4way_neon(sh0, sh1, sh2, sh3, h0, h1, h2, h3);
+    #else
+      sha256_33((unsigned char*)b0, sh0);
+      sha256_33((unsigned char*)b1, sh1);
+      sha256_33((unsigned char*)b2, sh2);
+      sha256_33((unsigned char*)b3, sh3);
+      ripemd160_32(sh0, h0);
+      ripemd160_32(sh1, h1);
+      ripemd160_32(sh2, h2);
+      ripemd160_32(sh3, h3);
+    #endif
 
   }
   break;
@@ -695,7 +947,15 @@ std::vector<std::string> Secp256K1::GetAddress(int type, bool compressed, unsign
   CHECKSUM(b2, add2);
   CHECKSUM(b3, add3);
   CHECKSUM(b4, add4);
+  #if defined(__x86_64__) || defined(_M_X64)
   sha256sse_checksum(b1,b2,b3,b4,add1 + 21, add2 + 21, add3 + 21, add4 + 21);
+  #else
+  // Fallback to scalar checksum on non-x86
+  sha256_checksum(add1 + 21, 33, add1 + 21 + 33);
+  sha256_checksum(add2 + 21, 33, add2 + 21 + 33);
+  sha256_checksum(add3 + 21, 33, add3 + 21 + 33);
+  sha256_checksum(add4 + 21, 33, add4 + 21 + 33);
+  #endif
 
   // Base58
   ret.push_back(EncodeBase58(add1, add1 + 25));
