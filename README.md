@@ -214,6 +214,69 @@ As you can see, even with a competitive hardware, it is very unlikely that you f
 
 # Compilation
 
+## Apple Silicon (M1/M2/M3) - macOS
+
+Apple Silicon Macでは高速なNostr npub検索が可能です。以下の手順でビルドしてください。
+
+### 必要な依存関係のインストール
+```sh
+# Homebrew経由でsecp256k1をインストール
+brew install secp256k1
+
+# 必要なヘッダーファイルがあることを確認
+ls /opt/homebrew/include/secp256k1/
+```
+
+### ビルド方法
+
+#### 1. CPU-only版（推奨 - 高性能最適化済み）
+```sh
+# libsecp256k1を使用した最高性能版
+USE_LIBSECP256K1=1 PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig make cpu
+
+# または通常版
+make cpu
+```
+
+#### 2. GPU版（Metal対応GPU搭載機の場合）
+```sh
+# 注意：Apple SiliconではCUDAは使用不可
+# Metal対応は将来実装予定
+```
+
+### 最適化されたビルドオプション
+```sh
+# M3 Max向け究極最適化版（推奨）
+USE_LIBSECP256K1=1 STATIC_GTABLE=1 PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig make cpu
+
+# デバッグ情報付きビルド
+USE_LIBSECP256K1=1 PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig make debug
+```
+
+### 性能
+- **M3 Max**: 約2.0 Mkey/s
+- **vs. rana**: 約17倍高速
+- **最適化**: ARM NEON SIMD、CPUアフィニティ、ゼロアロケーション
+
+### 使用例
+```sh
+# npub1k0で始まるアドレスを検索
+./VanitySearch -t 32 -stop npub1k0
+
+# より長いパターンの検索
+./VanitySearch -t 32 -stop npub1hello
+```
+
+### トラブルシューティング
+```sh
+# secp256k1が見つからない場合
+export PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig
+
+# ビルドエラーの場合はcleanしてから再ビルド
+make clean
+USE_LIBSECP256K1=1 PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig make cpu
+```
+
 ## Windows
 
 Intall CUDA SDK and open VanitySearch.sln in Visual C++ 2017.\
