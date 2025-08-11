@@ -36,12 +36,24 @@ public:
     void Finalize(unsigned char hash[20]);
 };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 void ripemd160(unsigned char *input,int length,unsigned char *digest);
 void ripemd160_32(unsigned char *input, unsigned char *digest);
+#ifdef __cplusplus
+}
+#endif
 void ripemd160sse_32(uint8_t *i0, uint8_t *i1, uint8_t *i2, uint8_t *i3,
   uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3);
 void ripemd160sse_test();
 std::string ripemd160_hex(unsigned char *digest);
+
+// Optional NEON-accelerated 4-way RIPEMD-160 for ARM
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+void ripemd160_neon_32x4(uint8_t *i0, uint8_t *i1, uint8_t *i2, uint8_t *i3,
+  uint8_t *d0, uint8_t *d1, uint8_t *d2, uint8_t *d3);
+#endif
 
 static inline bool ripemd160_comp_hash(uint8_t *h0, uint8_t *h1) {
   uint32_t *h0i = (uint32_t *)h0;
@@ -52,5 +64,13 @@ static inline bool ripemd160_comp_hash(uint8_t *h0, uint8_t *h1) {
     (h0i[3] == h1i[3]) &&
     (h0i[4] == h1i[4]);
 }
+
+// NEON 4-way parallel RIPEMD-160 (ARM64 only)
+#ifdef __aarch64__
+void ripemd160_4way_neon(const unsigned char *d0, const unsigned char *d1, 
+                         const unsigned char *d2, const unsigned char *d3,
+                         unsigned char *out0, unsigned char *out1,
+                         unsigned char *out2, unsigned char *out3);
+#endif
 
 #endif // RIPEMD160_H
