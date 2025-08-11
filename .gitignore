@@ -17,3 +17,16 @@ cmake-build-debug/
 
 # Ignore built Nostr binary
 VanitySearchNostr
+
+# Ignore test executables and utilities
+test_logic
+simple_test
+gen_cpu_table_*
+
+# Ignore log files and directories
+*.log
+log/
+
+# Ignore temporary build artifacts
+*.o
+*.tmp
