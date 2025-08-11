@@ -218,13 +218,72 @@ As you can see, even with a competitive hardware, it is very unlikely that you f
 
 Apple Silicon Macでは高速なNostr npub検索が可能です。以下の手順でビルドしてください。
 
-### 必要な依存関係のインストール
+### システム要件
+
+#### ハードウェア要件
+- **CPU**: Apple Silicon (M1, M1 Pro, M1 Max, M2, M2 Pro, M2 Max, M3, M3 Pro, M3 Max)
+- **メモリ**: 8GB以上推奨（16GB以上で最高性能）
+- **ストレージ**: 1GB以上の空き容量
+
+#### ソフトウェア要件
+- **macOS**: 11.0 (Big Sur) 以降
+- **Xcode Command Line Tools**: 必須
+- **Homebrew**: パッケージ管理用
+
+### 事前準備（初回のみ）
+
+#### 1. Xcode Command Line Toolsのインストール
 ```sh
-# Homebrew経由でsecp256k1をインストール
+# コマンドラインツールをインストール
+xcode-select --install
+
+# インストール確認
+xcode-select -p
+# 出力例: /Applications/Xcode.app/Contents/Developer
+```
+
+#### 2. Homebrewのインストール（未インストールの場合）
+```sh
+# Homebrewをインストール
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# パスを通す
+echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zshrc
+source ~/.zshrc
+
+# インストール確認
+brew --version
+```
+
+#### 3. 必要な依存関係のインストール
+```sh
+# libsecp256k1のインストール（高性能版に必須）
 brew install secp256k1
 
-# 必要なヘッダーファイルがあることを確認
+# pkg-configのインストール（ビルドシステム用）
+brew install pkg-config
+
+# 必要なヘッダーファイルの確認
 ls /opt/homebrew/include/secp256k1/
+# 出力例: secp256k1.h secp256k1_ecdh.h secp256k1_recovery.h
+
+# ライブラリファイルの確認
+ls /opt/homebrew/lib/libsecp256k1.*
+# 出力例: /opt/homebrew/lib/libsecp256k1.a /opt/homebrew/lib/libsecp256k1.dylib
+```
+
+#### 4. 環境変数の設定
+```sh
+# ~/.zshrcまたは~/.bashrcに追加（永続化）
+echo 'export PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH' >> ~/.zshrc
+source ~/.zshrc
+
+# 一時的な設定（現在のセッションのみ）
+export PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig
+
+# 設定確認
+pkg-config --cflags --libs libsecp256k1
+# 出力例: -I/opt/homebrew/include -L/opt/homebrew/lib -lsecp256k1
 ```
 
 ### ビルド方法
@@ -266,14 +325,79 @@ USE_LIBSECP256K1=1 PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig make debug
 ./VanitySearch -t 32 -stop npub1hello
 ```
 
-### トラブルシューティング
-```sh
-# secp256k1が見つからない場合
-export PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig
+### よくある問題とトラブルシューティング
 
-# ビルドエラーの場合はcleanしてから再ビルド
+#### ❌ secp256k1が見つからないエラー
+```sh
+# エラー例：
+# Package libsecp256k1 was not found in the pkg-config search path
+
+# 解決方法：
+export PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig
+pkg-config --exists libsecp256k1 && echo "OK" || echo "NG"
+
+# それでも解決しない場合：
+brew reinstall secp256k1 pkg-config
+```
+
+#### ❌ コンパイラエラー
+```sh
+# エラー例：
+# xcrun: error: invalid active developer path
+
+# 解決方法：
+sudo xcode-select --reset
+xcode-select --install
+```
+
+#### ❌ リンカーエラー
+```sh
+# エラー例：
+# ld: library not found for -lsecp256k1
+
+# 解決方法：
+brew list secp256k1  # インストール確認
+export LIBRARY_PATH=/opt/homebrew/lib:$LIBRARY_PATH
+```
+
+#### ❌ 権限エラー
+```sh
+# エラー例：
+# Permission denied
+
+# 解決方法：
+sudo chown -R $(whoami) /opt/homebrew
+```
+
+#### 🔧 完全クリーンビルド
+```sh
+# 全てをクリーンしてから再ビルド
 make clean
+rm -f VanitySearch *.o
 USE_LIBSECP256K1=1 PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig make cpu
+```
+
+#### 📊 ビルド成功の確認
+```sh
+# ビルド成功確認
+./VanitySearch -v
+# 出力例: VanitySearch v1.19
+
+# 基本動作テスト
+timeout 5s ./VanitySearch -t 4 -stop npub1test
+```
+
+#### 🚀 性能チューニング
+```sh
+# CPUコア数確認
+sysctl -n hw.ncpu
+# 出力例: 12
+
+# 最適なスレッド数でテスト（通常はCPUコア数と同じ）
+./VanitySearch -t 12 -stop npub1hello
+
+# M3 Max向け究極最適化版
+USE_LIBSECP256K1=1 STATIC_GTABLE=1 PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig make cpu
 ```
 
 ## Windows
