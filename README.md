@@ -255,7 +255,6 @@ USE_LIBSECP256K1=1 PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig make debug
 
 ### 性能
 - **M3 Max**: 約2.0 Mkey/s
-- **vs. rana**: 約17倍高速
 - **最適化**: ARM NEON SIMD、CPUアフィニティ、ゼロアロケーション
 
 ### 使用例
