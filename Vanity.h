@@ -26,7 +26,10 @@
 #include <Windows.h>
 #endif
 
-#define CPU_GRP_SIZE 1024
+// Further reduce group size to shorten per-iteration latency on Apple Silicon
+// レスポンスよりもスループット優先
+#define CPU_GRP_SIZE 288  // MICRO-TUNED: 288 = 32 * 9, perfect divisibility
+//#define STATIC_CPU_GTABLE  // Disabled until proper table generation
 
 class VanitySearch;
 
