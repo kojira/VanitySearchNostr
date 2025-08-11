@@ -213,7 +213,10 @@ private:
 
 #ifndef WIN64
 
-// Missing intrinsics
+#if defined(__x86_64__) || defined(_M_X64)
+
+// ===================== x86_64 (UNIX-like) =====================
+// Missing intrinsics implemented with inline asm and builtins
 static uint64_t inline _umul128(uint64_t a, uint64_t b, uint64_t *h) {
   uint64_t rhi;
   uint64_t rlo;
@@ -230,7 +233,7 @@ static int64_t inline _mul128(int64_t a, int64_t b, int64_t *h) {
   return rlo;  
 }
 
-static uint64_t inline _udiv128(uint64_t hi, uint64_t lo, uint64_t d,uint64_t *r) {
+static uint64_t inline _udiv128(uint64_t hi, uint64_t lo, uint64_t d, uint64_t *r) {
   uint64_t q;
   uint64_t _r;
   __asm__( "divq  %[d];" :"=d"(_r),"=a"(q) :"d"(hi),"a"(lo),[d]"rm"(d));
@@ -245,15 +248,63 @@ static uint64_t inline __rdtsc() {
   return (uint64_t)h << 32 | (uint64_t)l;
 }
 
-#define __shiftright128(a,b,n) ((a)>>(n))|((b)<<(64-(n)))
-#define __shiftleft128(a,b,n) ((b)<<(n))|((a)>>(64-(n)))
-
-
-#define _subborrow_u64(a,b,c,d) __builtin_ia32_sbb_u64(a,b,c,(long long unsigned int*)d);
-#define _addcarry_u64(a,b,c,d) __builtin_ia32_addcarryx_u64(a,b,c,(long long unsigned int*)d);
+#define _subborrow_u64(a,b,c,d) __builtin_ia32_subborrow_u64(a,b,c,(long long unsigned int*)d);
+#define _addcarry_u64(a,b,c,d)  __builtin_ia32_addcarryx_u64(a,b,c,(long long unsigned int*)d);
 #define _byteswap_uint64 __builtin_bswap64
 #define LZC(x) __builtin_clzll(x)
 #define TZC(x) __builtin_ctzll(x)
+
+#else
+
+// ===================== ARM64 and others =====================
+// Portable fallbacks using builtins and __int128
+static inline uint64_t _umul128(uint64_t a, uint64_t b, uint64_t *h) {
+  unsigned __int128 p = (unsigned __int128)a * (unsigned __int128)b;
+  *h = (uint64_t)(p >> 64);
+  return (uint64_t)p;
+}
+
+static inline int64_t _mul128(int64_t a, int64_t b, int64_t *h) {
+  __int128 p = (__int128)a * (__int128)b;
+  *h = (int64_t)((unsigned __int128)p >> 64);
+  return (int64_t)p;
+}
+
+static inline uint64_t _udiv128(uint64_t hi, uint64_t lo, uint64_t d, uint64_t *r) {
+  unsigned __int128 n = ((unsigned __int128)hi << 64) | (unsigned __int128)lo;
+  uint64_t q = (uint64_t)(n / d);
+  *r = (uint64_t)(n % d);
+  return q;
+}
+
+static inline uint64_t __rdtsc() {
+  // Fallback: no cycle counter; return 0
+  return 0ULL;
+}
+
+#define __shiftright128(a,b,n) (((uint64_t)(a))>>(n))|(((uint64_t)(b))<<(64-(n)))
+#define __shiftleft128(a,b,n)  (((uint64_t)(b))<<(n))|(((uint64_t)(a))>>(64-(n)))
+
+static inline unsigned char addcarry_u64(unsigned char carry_in, uint64_t a, uint64_t b, uint64_t *out) {
+  unsigned __int128 sum = (unsigned __int128)a + (unsigned __int128)b + (unsigned __int128)carry_in;
+  *out = (uint64_t)sum;
+  return (unsigned char)(sum >> 64);
+}
+
+static inline unsigned char subborrow_u64(unsigned char borrow_in, uint64_t a, uint64_t b, uint64_t *out) {
+  uint64_t tmp = b + (uint64_t)borrow_in;
+  unsigned char borrow = (a < tmp) ? 1 : 0;
+  *out = a - tmp;
+  return borrow;
+}
+
+#define _addcarry_u64(c_in, val, c_in2, dst_ptr) addcarry_u64((unsigned char)(c_in), (uint64_t)(val), (uint64_t)(c_in2), (uint64_t*)(dst_ptr))
+#define _subborrow_u64(b_in, a, b, dst_ptr)      subborrow_u64((unsigned char)(b_in), (uint64_t)(a), (uint64_t)(b), (uint64_t*)(dst_ptr))
+#define _byteswap_uint64 __builtin_bswap64
+#define LZC(x) __builtin_clzll(x)
+#define TZC(x) __builtin_ctzll(x)
+
+#endif // arch select
 
 #else
 

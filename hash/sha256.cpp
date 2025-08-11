@@ -17,6 +17,9 @@
 
 #include <string.h>
 #include "sha256.h"
+#if defined(__APPLE__) && defined(__aarch64__)
+#include <CommonCrypto/CommonCrypto.h>
+#endif
 
 #define BSWAP
 
@@ -29,10 +32,17 @@ namespace _sha256
 #ifndef WIN64
 #define _byteswap_ulong __builtin_bswap32
 #define _byteswap_uint64 __builtin_bswap64
+#if defined(__x86_64__) || defined(_M_X64)
 inline uint32_t _rotr(uint32_t x, uint8_t r) {
   asm("rorl %1,%0" : "+r" (x) : "c" (r));
   return x;
 }
+#else
+inline uint32_t _rotr(uint32_t x, uint8_t r) {
+  r &= 31u;
+  return (x >> r) | (x << (32 - r));
+}
+#endif
 #endif
 
 #define ROR(x,n) _rotr(x, n)
@@ -424,11 +434,13 @@ void CSHA256::Finalize(unsigned char hash[OUTPUT_SIZE])
 }
 
 void sha256(unsigned char *input, int length, unsigned char *digest) {
-
-	CSHA256 sha;
-	sha.Write(input, length);
-	sha.Finalize(digest);
-
+#if defined(__APPLE__) && defined(__aarch64__)
+  CC_SHA256(input, (CC_LONG)length, digest);
+#else
+  CSHA256 sha;
+  sha.Write(input, length);
+  sha.Finalize(digest);
+#endif
 }
 
 const uint8_t sizedesc_32[8] = { 0,0,0,0,0,0,1,0 };
