@@ -24,6 +24,7 @@
 #include <stdexcept>
 #include "hash/sha512.h"
 #include "hash/sha256.h"
+#include <time.h>
 
 #define RELEASE "1.19"
 
@@ -361,14 +362,53 @@ void reconstructAdd(Secp256K1 *secp, string fileName, string outputFile, string 
 
 int main(int argc, char* argv[]) {
 
+  // Ensure logs are visible immediately even when redirected to files (line-buffered)
+  setvbuf(stdout, NULL, _IOLBF, 0);
+  setvbuf(stderr, NULL, _IONBF, 0);
+
 
 
   // Global Init
   Timer::Init();
   rseed(Timer::getSeed32());
 
-  // Init SecpK1
+  // Construct Secp object (heavy initは後で)
   Secp256K1 *secp = new Secp256K1();
+
+  // Early startup logs and "早期バリデーション"（重い初期化の前に実行）
+  printf("VanitySearch v%s\n", RELEASE);
+  {
+    time_t now = time(NULL);
+    char *ct = ctime(&now);
+    if (ct) printf("Start %s", ct);
+  }
+
+  // Argに単一プレフィックスが与えられている典型ケースでは、npubパターンを事前検証
+  if (argc >= 2) {
+    const std::string bech32chars = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    std::string lastArg = std::string(argv[argc - 1]);
+    if (!lastArg.empty() && lastArg[0] != '-') {
+      // npub接頭辞有無でサフィックスを抽出
+      bool hasNpub = (lastArg.rfind("npub", 0) == 0);
+      std::string suffix = hasNpub ? lastArg.substr(4) : lastArg;
+      if (!suffix.empty() && suffix[0] == '1') suffix.erase(0, 1);
+      bool ok = true;
+      for (size_t i = 0; i < suffix.size() && ok; ++i) {
+        char c = suffix[i];
+        if (c == '*' || c == '?') continue;
+        if ((char)tolower(c) != c) ok = false;
+        else if (bech32chars.find(c) == std::string::npos) ok = false;
+      }
+      if (!ok) {
+        printf("Error: Invalid npub prefix '%s' (allowed chars: %s, wildcards: ? *)\n",
+               lastArg.c_str(), bech32chars.c_str());
+        exit(-1);
+      }
+    }
+  }
+
+  printf("Initializing secp256k1...\n");
+  fflush(stdout);
   secp->Init();
 
   // Browse arguments
